@@ -2,20 +2,21 @@ name: ci
 
 on:
   workflow_dispatch:
-    inputs:
-      idx:
-        required: true
-        default: '0'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      matrix:
+        idx: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+      max-parallel: 20
+      fail-fast: false
     steps:
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq masscan
 
       - run: |
-          S=${{ github.event.inputs.idx }}
+          S=${{ matrix.idx }}
           E="0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.168.0.0/16,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,224.0.0.0/3"
           case $S in
             0) R="1.0.0.0/8,2.0.0.0/7";;1) R="4.0.0.0/6";;2) R="8.0.0.0/7,11.0.0.0/8";;
@@ -35,6 +36,6 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: d-${{ github.event.inputs.idx }}
+          name: d-${{ matrix.idx }}
           path: r.txt
           retention-days: 5
