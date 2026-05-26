@@ -1,10 +1,9 @@
 name: ci
-
 on:
   workflow_dispatch:
 
 jobs:
-  build:
+  t:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -13,29 +12,87 @@ jobs:
       max-parallel: 20
       fail-fast: false
     steps:
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq masscan
+      - name: deps
+        run: sudo apt-get update -qq && sudo apt-get install -y masscan
 
-      - run: |
-          S=${{ matrix.idx }}
-          E="0.0.0.0/8,10.0.0.0/8,100.64.0.0/10,127.0.0.0/8,169.254.0.0/16,172.16.0.0/12,192.0.0.0/24,192.0.2.0/24,192.168.0.0/16,198.18.0.0/15,198.51.100.0/24,203.0.113.0/24,224.0.0.0/3"
-          case $S in
-            0) R="1.0.0.0/8,2.0.0.0/7";;1) R="4.0.0.0/6";;2) R="8.0.0.0/7,11.0.0.0/8";;
-            3) R="12.0.0.0/6";;4) R="16.0.0.0/5,24.0.0.0/7";;5) R="26.0.0.0/7,28.0.0.0/6";;
-            6) R="32.0.0.0/4,48.0.0.0/6";;7) R="52.0.0.0/6,56.0.0.0/5";;
-            8) R="64.0.0.0/4,80.0.0.0/5";;9) R="88.0.0.0/5,96.0.0.0/6";;
-            10) R="101.0.0.0/8,102.0.0.0/7,104.0.0.0/5";;11) R="112.0.0.0/5,120.0.0.0/6";;
-            12) R="124.0.0.0/7,128.0.0.0/6";;13) R="132.0.0.0/6,136.0.0.0/5";;
-            14) R="144.0.0.0/4";;15) R="160.0.0.0/5,168.0.0.0/6";;
-            16) R="174.0.0.0/7,176.0.0.0/4";;17) R="193.0.0.0/8,194.0.0.0/7,196.0.0.0/6";;
-            18) R="200.0.0.0/5,208.0.0.0/5";;19) R="216.0.0.0/5";;
-            *) exit 1;;
-          esac
-          sudo masscan $R -p8848 --rate=20000 --exclude $E --max-retries 1 -oL out.txt 2>&1|tail -3
-          grep '^open' out.txt|awk '{print $4}'|sort -t. -k1,1n -k2,2n -k3,3n -k4,4n -u > r.txt
-          wc -l < r.txt
+      - name: exec
+        env:
+          IDX: ${{ matrix.idx }}
+        run: |
+          python3 /dev/stdin << 'PY'
+          import os, ipaddress
+          idx = int(os.environ['IDX'])
+          total = 20
+          rv = [
+            '0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8',
+            '169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24',
+            '192.88.99.0/24','192.168.0.0/16','198.18.0.0/15','198.51.100.0/24',
+            '203.0.113.0/24','224.0.0.0/3'
+          ]
+          rn = [ipaddress.ip_network(r) for r in rv]
+          bl = []
+          for o in range(1, 224):
+              n = ipaddress.ip_network(f'{o}.0.0.0/8')
+              if not any(n.overlaps(r) and r.prefixlen <= 8 for r in rn):
+                  bl.append((2**24, str(n)))
+          for o in [100, 172, 192, 198]:
+              bl.append((2**24, f'{o}.0.0.0/8'))
+          bl.sort(reverse=True, key=lambda x: x[0])
+          sh = [[] for _ in range(total)]
+          ld = [0]*total
+          for c, ci in bl:
+              b = min(range(total), key=lambda i: ld[i])
+              sh[b].append(ci)
+              ld[b] += c
+          with open('t.txt', 'w') as f:
+              for c in sh[idx]: f.write(c + '\n')
+          PY
+
+          cat > e.txt << 'E'
+          0.0.0.0/8
+          10.0.0.0/8
+          100.64.0.0/10
+          127.0.0.0/8
+          169.254.0.0/16
+          172.16.0.0/12
+          192.0.0.0/24
+          192.0.2.0/24
+          192.88.99.0/24
+          192.168.0.0/16
+          198.18.0.0/15
+          198.51.100.0/24
+          203.0.113.0/24
+          224.0.0.0/3
+          E
+
+          sudo masscan -iL t.txt -p 9200,8500,8070,2375 --rate 10000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
+          grep '^open' o.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
 
       - uses: actions/upload-artifact@v4
         with:
           name: d-${{ matrix.idx }}
           path: r.txt
-          retention-days: 5
+          retention-days: 3
+
+  m:
+    needs: t
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: d-*
+          merge-multiple: false
+      - name: c
+        run: |
+          cat d-*/r.txt 2>/dev/null | sort -u > a.txt
+          for p in 9200 8500 8070 2375; do grep ":${p}$" a.txt > p${p}.txt 2>/dev/null || true; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: r
+          path: |
+            a.txt
+            p9200.txt
+            p8500.txt
+            p8070.txt
+            p2375.txt
+          retention-days: 7
