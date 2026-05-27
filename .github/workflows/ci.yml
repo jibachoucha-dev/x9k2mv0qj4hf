@@ -65,7 +65,7 @@ jobs:
           224.0.0.0/3
           E
 
-          sudo masscan -iL t.txt -p 9200 --rate 10000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
+          sudo masscan -iL t.txt -p 9200 --rate 30000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
           grep '^open' o.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
           echo "Found $(wc -l < r.txt) hosts"
 
