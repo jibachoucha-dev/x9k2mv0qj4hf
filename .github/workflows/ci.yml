@@ -12,67 +12,49 @@ jobs:
       max-parallel: 20
       fail-fast: false
     steps:
-      - name: deps
-        run: sudo apt-get update -qq && sudo apt-get install -y masscan
+      - name: setup
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y masscan
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null
+          export PATH=$PATH:$(go env GOPATH)/bin
+          httpx -version 2>/dev/null || true
 
-      - name: exec
+      - name: run
         env:
           IDX: ${{ matrix.idx }}
         run: |
-          python3 /dev/stdin << 'PY'
-          import os, ipaddress
-          idx = int(os.environ['IDX'])
-          total = 20
-          rv = [
-            '0.0.0.0/8','10.0.0.0/8','100.64.0.0/10','127.0.0.0/8',
-            '169.254.0.0/16','172.16.0.0/12','192.0.0.0/24','192.0.2.0/24',
-            '192.88.99.0/24','192.168.0.0/16','198.18.0.0/15','198.51.100.0/24',
-            '203.0.113.0/24','224.0.0.0/3'
-          ]
-          rn = [ipaddress.ip_network(r) for r in rv]
-          bl = []
-          for o in range(1, 224):
-              n = ipaddress.ip_network(f'{o}.0.0.0/8')
-              if not any(n.overlaps(r) and r.prefixlen <= 8 for r in rn):
-                  bl.append((2**24, str(n)))
-          for o in [100, 172, 192, 198]:
-              bl.append((2**24, f'{o}.0.0.0/8'))
-          bl.sort(reverse=True, key=lambda x: x[0])
-          sh = [[] for _ in range(total)]
-          ld = [0]*total
-          for c, ci in bl:
-              b = min(range(total), key=lambda i: ld[i])
-              sh[b].append(ci)
-              ld[b] += c
-          with open('t.txt', 'w') as f:
-              for c in sh[idx]: f.write(c + '\n')
-          PY
+          export PATH=$PATH:$(go env GOPATH)/bin
 
-          cat > e.txt << 'E'
-          0.0.0.0/8
-          10.0.0.0/8
-          100.64.0.0/10
-          127.0.0.0/8
-          169.254.0.0/16
-          172.16.0.0/12
-          192.0.0.0/24
-          192.0.2.0/24
-          192.88.99.0/24
-          192.168.0.0/16
-          198.18.0.0/15
-          198.51.100.0/24
-          203.0.113.0/24
-          224.0.0.0/3
-          E
+          # 从APNIC获取中国全量IP
+          curl -s "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" | grep "apnic|CN|ipv4" | awk -F'|' '{n=$5;p=32;while(n>1){n=n/2;p--}print $4"/"p}' > cn.txt
+          echo "CN CIDRs: $(wc -l < cn.txt)"
 
-          sudo masscan -iL t.txt -p 9200 --rate 30000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
+          # 分片
+          total=20
+          idx=$IDX
+          awk -v idx="$idx" -v total="$total" 'NR%total==idx' cn.txt > t.txt
+          echo "Shard $idx: $(wc -l < t.txt) CIDRs"
+
+          sudo masscan -iL t.txt -p 9200 --rate 30000 --wait 5 -oL o.txt 2>/dev/null || true
           grep '^open' o.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
-          echo "Found $(wc -l < r.txt) hosts"
+          echo "Found $(wc -l < r.txt) open ports"
 
-      - uses: actions/upload-artifact@v4
+          grep ':9200$' r.txt | sed 's/:9200$//' > p1.txt || true
+          if [ -s p1.txt ]; then
+            sed 's/$/:9200/' p1.txt | httpx -silent -timeout 8 -threads 200 -mc 200 -ms 'cluster_name' -o v1.txt 2>/dev/null || true
+            sed 's/$/:9200\/_cat\/indices/' p1.txt | httpx -silent -timeout 8 -threads 200 -mc 200 -o v2.txt 2>/dev/null || true
+          fi
+
+          for f in v1 v2; do [ -f ${f}.txt ] && echo "${f}: $(wc -l < ${f}.txt)"; done
+
+      - name: upload
+        uses: actions/upload-artifact@v4
         with:
           name: d-${{ matrix.idx }}
-          path: r.txt
+          path: |
+            r.txt
+            v1.txt
+            v2.txt
           retention-days: 3
 
   m:
@@ -85,10 +67,14 @@ jobs:
           merge-multiple: false
       - name: c
         run: |
-          cat d-*/r.txt 2>/dev/null | sort -u > es.txt
-          echo "Total ES targets: $(wc -l < es.txt)"
+          cat d-*/r.txt 2>/dev/null | sort -u > all.txt
+          for f in v1 v2; do cat d-*/${f}.txt 2>/dev/null | sort -u > ${f}.txt || true; done
+          wc -l all.txt v*.txt 2>/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: r
-          path: es.txt
+          path: |
+            all.txt
+            v1.txt
+            v2.txt
           retention-days: 7
