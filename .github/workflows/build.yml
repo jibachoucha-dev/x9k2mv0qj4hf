@@ -160,10 +160,9 @@ jobs:
           print(f'Shard {idx}: {len(my_cidrs)} CIDRs')
           PYEOF
 
-          # Apollo ports: 8070(portal), 8080(config), 8090(admin)
-          # Also 8848(nacos re-check), 9090(prometheus)
+          # Apollo ports + Nacos + actuator
           sudo masscan -iL targets.txt \
-            -p 8070,8090 \
+            -p 8070,8090,8848 \
             --rate 10000 \
             --wait 5 \
             -oL raw.txt 2>/dev/null || true
@@ -194,12 +193,13 @@ jobs:
           echo "=== Total ==="
           wc -l all.txt
           echo "=== By port ==="
-          for p in 8070 8090; do
+          for p in 8070 8090 8848; do
             cnt=$(grep ":${p}$" all.txt | wc -l)
             echo "Port $p: $cnt"
           done
           grep ':8070$' all.txt > apollo_portal.txt || true
           grep ':8090$' all.txt > apollo_admin.txt || true
+          grep ':8848$' all.txt > nacos.txt || true
 
       - name: upload-merged
         uses: actions/upload-artifact@v4
@@ -209,4 +209,5 @@ jobs:
             all.txt
             apollo_portal.txt
             apollo_admin.txt
+            nacos.txt
           retention-days: 7
