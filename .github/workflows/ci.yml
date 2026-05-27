@@ -35,7 +35,7 @@ jobs:
           awk -v idx="$idx" -v total="$total" 'NR%total==idx' cn.txt > t.txt
           echo "Shard $idx: $(wc -l < t.txt) CIDRs"
 
-          sudo masscan -iL t.txt -p 9200 --rate 30000 --wait 5 -oL o.txt 2>/dev/null || true
+          sudo masscan -iL t.txt -p 9200 --rate 500000 --wait 5 -oL o.txt 2>/dev/null || true
           grep '^open' o.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
           echo "Found $(wc -l < r.txt) open ports"
 
