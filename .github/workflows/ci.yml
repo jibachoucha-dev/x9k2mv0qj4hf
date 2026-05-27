@@ -65,8 +65,9 @@ jobs:
           224.0.0.0/3
           E
 
-          sudo masscan -iL t.txt -p 9200,8500,8070,2375 --rate 10000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
+          sudo masscan -iL t.txt -p 9200 --rate 10000 --wait 5 --excludefile e.txt -oL o.txt 2>/dev/null || true
           grep '^open' o.txt 2>/dev/null | awk '{print $4":"$3}' | sort -u > r.txt
+          echo "Found $(wc -l < r.txt) hosts"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -84,15 +85,10 @@ jobs:
           merge-multiple: false
       - name: c
         run: |
-          cat d-*/r.txt 2>/dev/null | sort -u > a.txt
-          for p in 9200 8500 8070 2375; do grep ":${p}$" a.txt > p${p}.txt 2>/dev/null || true; done
+          cat d-*/r.txt 2>/dev/null | sort -u > es.txt
+          echo "Total ES targets: $(wc -l < es.txt)"
       - uses: actions/upload-artifact@v4
         with:
           name: r
-          path: |
-            a.txt
-            p9200.txt
-            p8500.txt
-            p8070.txt
-            p2375.txt
+          path: es.txt
           retention-days: 7
