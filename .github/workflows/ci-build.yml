@@ -2,19 +2,59 @@ name: ci-build
 on:
   workflow_dispatch:
     inputs:
-      ranges:
-        required: true
       rate:
         required: false
         default: "30000"
-      batch:
-        required: false
-        default: "0"
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - batch: 0
+            ranges: "1.0.0.0/8,14.0.0.0/8"
+          - batch: 1
+            ranges: "27.0.0.0/8,36.0.0.0/8"
+          - batch: 2
+            ranges: "39.0.0.0/8,42.0.0.0/8"
+          - batch: 3
+            ranges: "43.0.0.0/8,45.0.0.0/8"
+          - batch: 4
+            ranges: "47.0.0.0/8,49.0.0.0/8"
+          - batch: 5
+            ranges: "58.0.0.0/8,59.0.0.0/8"
+          - batch: 6
+            ranges: "60.0.0.0/8,61.0.0.0/8"
+          - batch: 7
+            ranges: "101.0.0.0/8,103.0.0.0/8"
+          - batch: 8
+            ranges: "106.0.0.0/8,107.0.0.0/8"
+          - batch: 9
+            ranges: "110.0.0.0/8,111.0.0.0/8"
+          - batch: 10
+            ranges: "112.0.0.0/8,113.0.0.0/8"
+          - batch: 11
+            ranges: "114.0.0.0/8,115.0.0.0/8"
+          - batch: 12
+            ranges: "116.0.0.0/8,117.0.0.0/8"
+          - batch: 13
+            ranges: "118.0.0.0/8,119.0.0.0/8"
+          - batch: 14
+            ranges: "120.0.0.0/8,121.0.0.0/8"
+          - batch: 15
+            ranges: "122.0.0.0/8,123.0.0.0/8"
+          - batch: 16
+            ranges: "124.0.0.0/8,125.0.0.0/8"
+          - batch: 17
+            ranges: "163.0.0.0/8,171.0.0.0/8"
+          - batch: 18
+            ranges: "175.0.0.0/8,180.0.0.0/8"
+          - batch: 19
+            ranges: "182.0.0.0/8,183.0.0.0/8"
+
     steps:
       - name: deps
         run: |
@@ -22,45 +62,32 @@ jobs:
           sudo apt-get install -y -qq masscan jq
           sudo setcap cap_net_raw+ep $(which masscan)
 
-      - name: prep
-        run: |
-          echo '${{ inputs.ranges }}' | tr ',' '\n' > ranges.txt
-          cat ranges.txt | wc -l
-
       - name: run
         run: |
-          PORTS="9200,9201,5601,9600,8200,8443,9243"
+          echo '${{ matrix.ranges }}' | tr ',' '\n' > ranges.txt
+          PORTS="9200,9201,9243,5601"
           masscan -iL ranges.txt -p${PORTS} \
             --rate=${{ inputs.rate }} \
             --open-only \
-            -oJ raw.json \
-            --banners || true
+            -oJ raw.json || true
 
-          if [ ! -f raw.json ]; then
-            echo "[]" > raw.json
-          fi
+          if [ ! -f raw.json ]; then echo "[]" > raw.json; fi
 
-          jq -r '.[] | select(.ports) | .ip as $ip | .ports[] | "\(.port) \($ip)"' raw.json 2>/dev/null \
-            | sort -u > open_ports.txt || touch open_ports.txt
+          jq -r '.[] | "\(.ports[].port) \(.ip)"' raw.json 2>/dev/null \
+            | grep -v ' null$' | sort -u > open_ports.txt || touch open_ports.txt
 
-          sort -t' ' -k2 open_ports.txt \
-            | awk '{print $2}' | sort -u > ips.txt
-
-          echo "=== stats ==="
+          echo "=== batch ${{ matrix.batch }} stats ==="
           echo "total_open: $(wc -l < open_ports.txt)"
-          echo "unique_ips: $(wc -l < ips.txt)"
-          for p in 9200 9201 5601 9600 8200 8443 9243; do
-            c=$(grep "^${p} " open_ports.txt | wc -l)
-            echo "port_${p}: ${c}"
+          for p in 9200 9201 9243 5601; do
+            echo "port_${p}: $(grep "^${p} " open_ports.txt | wc -l)"
           done
 
       - name: save
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ inputs.batch }}
+          name: build-${{ matrix.batch }}
           path: |
             open_ports.txt
-            ips.txt
             raw.json
           retention-days: 30
