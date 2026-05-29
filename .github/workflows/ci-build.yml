@@ -73,8 +73,8 @@ jobs:
 
           if [ ! -f raw.json ]; then echo "[]" > raw.json; fi
 
-          jq -r '.[] | "\(.ports[].port) \(.ip)"' raw.json 2>/dev/null \
-            | grep -v ' null$' | sort -u > open_ports.txt || touch open_ports.txt
+          jq -r '.[] | "\(.ip):\(.ports[].port)"' raw.json 2>/dev/null \
+            | grep -v '^null:' | sort -u > open_ports.txt || touch open_ports.txt
 
           echo "=== batch ${{ matrix.batch }} stats ==="
           echo "total_open: $(wc -l < open_ports.txt)"
