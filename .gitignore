@@ -1,0 +1,6 @@
+# never commit secrets
+*.env
+.env
+.env.*
+loot/
+results/

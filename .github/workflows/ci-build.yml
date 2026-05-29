@@ -1,0 +1,66 @@
+name: ci-build
+on:
+  workflow_dispatch:
+    inputs:
+      ranges:
+        required: true
+      rate:
+        required: false
+        default: "30000"
+      batch:
+        required: false
+        default: "0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq masscan jq
+          sudo setcap cap_net_raw+ep $(which masscan)
+
+      - name: prep
+        run: |
+          echo '${{ inputs.ranges }}' | tr ',' '\n' > ranges.txt
+          cat ranges.txt | wc -l
+
+      - name: run
+        run: |
+          PORTS="9200,9201,5601,9600,8200,8443,9243"
+          masscan -iL ranges.txt -p${PORTS} \
+            --rate=${{ inputs.rate }} \
+            --open-only \
+            -oJ raw.json \
+            --banners || true
+
+          if [ ! -f raw.json ]; then
+            echo "[]" > raw.json
+          fi
+
+          jq -r '.[] | select(.ports) | .ports[] | "\(.port) \(.["ip"])"' raw.json 2>/dev/null \
+            | sort -u > open_ports.txt || touch open_ports.txt
+
+          sort -t' ' -k2 open_ports.txt \
+            | awk '{print $2}' | sort -u > ips.txt
+
+          echo "=== stats ==="
+          echo "total_open: $(wc -l < open_ports.txt)"
+          echo "unique_ips: $(wc -l < ips.txt)"
+          for p in 9200 9201 5601 9600 8200 8443 9243; do
+            c=$(grep "^${p} " open_ports.txt | wc -l)
+            echo "port_${p}: ${c}"
+          done
+
+      - name: save
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.batch }}
+          path: |
+            open_ports.txt
+            ips.txt
+            raw.json
+          retention-days: 30
