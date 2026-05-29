@@ -1,0 +1,181 @@
+name: cn-socks5-scan
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'Packets per second'
+        default: '2000000'
+  schedule:
+    - cron: '15 * * * *'     # every 60 minutes — keep proxy list fresh
+
+jobs:
+  masscan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Install masscan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+
+      - name: Fetch China IP ranges (APNIC)
+        run: |
+          curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
+            | grep "^apnic|CN|ipv4|" > cn_raw.txt
+
+          python3 - <<'PY'
+          import math
+          cidrs = []
+          with open("cn_raw.txt") as f:
+              for line in f:
+                  parts = line.strip().split("|")
+                  if len(parts) < 5: continue
+                  ip, count = parts[3], int(parts[4])
+                  cidrs.append(f"{ip}/{32 - int(math.log2(count))}")
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(cidrs))
+          total = sum(2**(32-int(c.split('/')[1])) for c in cidrs)
+          print(f"[*] CN CIDRs: {len(cidrs)}, total IPs: ~{total:,}")
+          PY
+
+      - name: Scan SOCKS5 ports
+        run: |
+          # Common SOCKS5 ports: 1080,1081,10808,7890,7891,8880,9050,9150,4145,43350
+          PORTS="1080,1081,10808,7890,7891,8880,9050,4145,43350,10801,1089,20170,51837"
+          RATE="${{ inputs.rate || '2000000' }}"
+          echo "[*] Scanning SOCKS5 ports: $PORTS at ${RATE} pps"
+          sudo masscan \
+            -iL targets.txt \
+            -p "$PORTS" \
+            --rate "$RATE" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oJ masscan_socks5_raw.json
+          echo "[*] Open ports: $(grep -c '"port"' masscan_socks5_raw.json 2>/dev/null || echo 0)"
+
+      - name: Parse to ip:port list
+        run: |
+          python3 - <<'PY'
+          import json
+
+          try:
+              with open("masscan_socks5_raw.json") as f:
+                  raw = f.read().strip()
+              if not raw or raw in ('', '[]'):
+                  print("[!] No results"); exit(0)
+              if not raw.startswith('['):
+                  raw = '[' + raw.rstrip(',\n') + ']'
+              data = json.loads(raw)
+          except Exception as e:
+              print(f"Parse error: {e}"); data = []
+
+          lines = set()
+          for entry in data:
+              ip = entry.get("ip")
+              if not ip: continue
+              for p in entry.get("ports", []):
+                  port = p.get("port")
+                  if port:
+                      lines.add(f"{ip}:{port}")
+
+          with open("socks5_candidates.txt", "w") as f:
+              f.write("\n".join(sorted(lines)))
+
+          print(f"[done] {len(lines)} SOCKS5 candidates")
+          PY
+
+      - name: Validate SOCKS5 proxies
+        run: |
+          # Phase 1: fast SOCKS5 handshake test
+          # Phase 2: real connectivity test via httpbin through proxy
+          python3 - <<'PY'
+          import socket, struct, concurrent.futures, time, sys, os
+
+          def test_handshake(addr, timeout=3):
+              """Quick SOCKS5 protocol handshake — confirms it speaks SOCKS5."""
+              host, port = addr.rsplit(":", 1)
+              try:
+                  s = socket.create_connection((host, int(port)), timeout=timeout)
+                  s.sendall(b"\x05\x01\x00")
+                  resp = s.recv(2)
+                  s.close()
+                  if len(resp) == 2 and resp[0] == 0x05 and resp[1] in (0x00, 0x02):
+                      return addr
+              except:
+                  pass
+              return None
+
+          def test_connectivity(addr, timeout=8):
+              """Connect to httpbin.org:80 through the SOCKS5 proxy to confirm real routing."""
+              host, port = addr.rsplit(":", 1)
+              try:
+                  s = socket.create_connection((host, int(port)), timeout=timeout)
+                  # handshake
+                  s.sendall(b"\x05\x01\x00")
+                  resp = s.recv(2)
+                  if len(resp) != 2 or resp[0] != 0x05 or resp[1] not in (0x00, 0x02):
+                      s.close(); return None
+                  # CONNECT to httpbin.org:80 (domain type 0x03)
+                  target = b"httpbin.org"
+                  req = b"\x05\x01\x00\x03" + bytes([len(target)]) + target + struct.pack("!H", 80)
+                  s.sendall(req)
+                  cresp = s.recv(10)
+                  if len(cresp) < 2 or cresp[1] != 0x00:
+                      s.close(); return None
+                  # Send HTTP request
+                  s.sendall(b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n")
+                  data = b""
+                  while True:
+                      chunk = s.recv(4096)
+                      if not chunk: break
+                      data += chunk
+                      if len(data) > 4096: break
+                  s.close()
+                  if b"200 OK" in data and b"origin" in data:
+                      return addr
+              except:
+                  pass
+              return None
+
+          with open("socks5_candidates.txt") as f:
+              candidates = [l.strip() for l in f if l.strip()]
+
+          # Phase 1: handshake
+          print(f"[phase1] Testing {len(candidates)} candidates (handshake)...")
+          handshake_ok = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=500) as ex:
+              futs = {ex.submit(test_handshake, c): c for c in candidates}
+              for fut in concurrent.futures.as_completed(futs):
+                  r = fut.result()
+                  if r:
+                      handshake_ok.append(r)
+          print(f"[phase1] {len(handshake_ok)} passed handshake")
+
+          # Phase 2: connectivity
+          print(f"[phase2] Testing {len(handshake_ok)} proxies (real connectivity)...")
+          alive = []
+          with concurrent.futures.ThreadPoolExecutor(max_workers=200) as ex:
+              futs = {ex.submit(test_connectivity, c): c for c in handshake_ok}
+              for fut in concurrent.futures.as_completed(futs):
+                  r = fut.result()
+                  if r:
+                      alive.append(r)
+                      if len(alive) % 50 == 0:
+                          print(f"  verified {len(alive)}...", file=sys.stderr)
+
+          with open("socks5_alive.txt", "w") as f:
+              f.write("\n".join(sorted(alive)))
+
+          print(f"[done] {len(alive)} / {len(candidates)} fully verified SOCKS5 proxies")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-socks5-${{ github.run_id }}
+          path: |
+            masscan_socks5_raw.json
+            socks5_candidates.txt
+            socks5_alive.txt
+          retention-days: 3
