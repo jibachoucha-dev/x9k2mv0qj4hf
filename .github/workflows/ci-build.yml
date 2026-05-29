@@ -40,7 +40,7 @@ jobs:
             echo "[]" > raw.json
           fi
 
-          jq -r '.[] | select(.ports) | .ports[] | "\(.port) \(.["ip"])"' raw.json 2>/dev/null \
+          jq -r '.[] | select(.ports) | .ip as $ip | .ports[] | "\(.port) \($ip)"' raw.json 2>/dev/null \
             | sort -u > open_ports.txt || touch open_ports.txt
 
           sort -t' ' -k2 open_ports.txt \
