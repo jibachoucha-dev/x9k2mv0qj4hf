@@ -1,0 +1,51 @@
+name: redis-mongo-es
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'pps per shard'
+        default: '500000'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+    steps:
+      - name: Setup
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y masscan
+          curl -s "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
+            | grep "^apnic|CN|ipv4|" > cn_raw.txt
+          python3 -c "
+          import math
+          cidrs = []
+          with open('cn_raw.txt') as f:
+              for line in f:
+                  p = line.strip().split('|')
+                  if len(p) < 5: continue
+                  cidrs.append(f'{p[3]}/{32-int(math.log2(int(p[4])))}')
+          n = len(cidrs)
+          shard = ${{ matrix.shard }}
+          total = 20
+          chunk = cidrs[shard*n//total:(shard+1)*n//total]
+          with open('targets.txt','w') as f:
+              f.write('\n'.join(chunk))
+          print(f'Shard {shard}: {len(chunk)} CIDRs')
+          "
+
+      - name: Masscan
+        run: |
+          sudo masscan -iL targets.txt -p6379,27017,9200 \
+            --rate ${{ inputs.rate }} \
+            --wait 10 -oJ results.json 2>&1 | tail -5
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: s-${{ matrix.shard }}
+          path: results.json
+          retention-days: 3

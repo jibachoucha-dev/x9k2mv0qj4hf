@@ -1,0 +1,100 @@
+name: nuclei-scan
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Target URLs (newline or comma separated)'
+        required: true
+      tags:
+        description: 'Template tags (comma-separated)'
+        default: 'cve,exposure,misconfig,default-login,takeover'
+      severity:
+        description: 'Severity filter'
+        default: 'medium,high,critical'
+      rate_limit:
+        description: 'Requests per second'
+        default: '50'
+      concurrency:
+        description: 'Concurrent templates'
+        default: '25'
+
+jobs:
+  nuclei:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install nuclei
+        run: |
+          go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Update templates
+        run: nuclei -update-templates -silent
+
+      - name: Prepare targets
+        run: |
+          echo "${{ inputs.targets }}" \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' > targets.txt
+          echo "Targets: $(wc -l < targets.txt)"
+
+      - name: Run nuclei
+        run: |
+          nuclei -l targets.txt \
+            -tags "${{ inputs.tags }}" \
+            -severity "${{ inputs.severity }}" \
+            -rate-limit "${{ inputs.rate_limit }}" \
+            -c "${{ inputs.concurrency }}" \
+            -j -o nuclei_results.jsonl \
+            -stats -silent || true
+
+          echo "=== Findings: $(wc -l < nuclei_results.jsonl 2>/dev/null || echo 0) ==="
+          # Quick summary
+          if [ -f nuclei_results.jsonl ]; then
+            jq -r '.info.severity' nuclei_results.jsonl 2>/dev/null \
+              | sort | uniq -c | sort -rn || true
+          fi
+
+      - name: Generate summary
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          try:
+              findings = []
+              with open("nuclei_results.jsonl") as f:
+                  for line in f:
+                      if line.strip():
+                          findings.append(json.loads(line))
+              summary = {}
+              for f in findings:
+                  sev = f.get("info", {}).get("severity", "unknown")
+                  summary.setdefault(sev, []).append({
+                      "template": f.get("template-id"),
+                      "name": f.get("info", {}).get("name"),
+                      "host": f.get("host"),
+                      "matched_at": f.get("matched-at"),
+                  })
+              with open("nuclei_summary.json", "w") as out:
+                  json.dump(summary, out, indent=2)
+              print(f"Total findings: {len(findings)}")
+              for sev, items in summary.items():
+                  print(f"  {sev}: {len(items)}")
+          except FileNotFoundError:
+              print("No findings file produced")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nuclei-${{ github.run_id }}
+          path: |
+            nuclei_results.jsonl
+            nuclei_summary.json
+          retention-days: 3

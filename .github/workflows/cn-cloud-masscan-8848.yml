@@ -1,0 +1,329 @@
+name: cn-cloud-masscan-8848
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'Packets per second per shard'
+        default: '1000000'
+      shards:
+        description: 'Number of parallel shards'
+        default: '20'
+
+jobs:
+  scan:
+    strategy:
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+
+      - name: Collect all cloud IPs and shard
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          TOTAL_SHARDS: ${{ inputs.shards }}
+        run: |
+          python3 - <<'PY'
+          import urllib.request, json, os, time, math
+
+          shard_index = int(os.environ["SHARD_INDEX"])
+          total_shards = int(os.environ["TOTAL_SHARDS"])
+
+          # ── ASN-based providers ──────────────────────────────────────
+          CLOUD_ASNS = {
+              # 国内大型公有云
+              "aliyun":         [37963, 45102, 134963, 45103, 131534],
+              "tencent":        [45090, 132203, 134175, 132591, 138697],
+              "huawei":         [55990, 136907, 137227, 136973, 139070],
+              "baidu":          [38365, 55967, 23724, 132852, 38627],
+              "jdcloud":        [134419, 58519, 132839],
+              "volcengine":     [138699, 396986, 139070, 55256, 138771],
+              "kingsoft":       [132337, 138954],
+              "qiniu":          [138021, 132908],
+              "netease":        [63835, 63599, 58604],
+              "qingcloud":      [138962, 132908, 139070],
+              # 运营商云
+              "cmcc_cloud":     [56048, 24445, 9808, 56046, 56044, 58453, 134773, 56040],
+              "ctcc_cloud":     [136764, 140726, 140921, 134764, 140061, 4134, 23724],
+              "cucc_cloud":     [10099, 4837, 17816, 134810, 17621, 9929, 131201],
+              # 国内IDC / CDN
+              "21vianet":       [58519, 58461, 131657, 136191],
+              "wangsu":         [17964, 131477, 138183],
+              "ucloud":         [135377, 59019, 136195],
+              "chinacache":     [38283, 131209],
+              "dnion":          [38071, 136308],
+              "coresite":       [45062, 131534],
+              "sugon":          [134178, 140574],
+              "inspur":         [138949, 140287],
+              "digitalchina":   [38283, 131209, 134178],
+              "youfu":          [131243, 9929],
+              "huashu":         [17429, 131723],
+              "east_cloud":     [135061, 140197],
+              "anchnet":        [136190, 140551],
+              "yovole":         [137702, 132591],
+              "cds":            [134810, 134764, 140491],
+              "cloudeast":      [136308, 140491],
+              # 亚太 ISP / IDC (HK/TW/SG/JP/KR)
+              "hk_pccw":        [4760, 9269, 23804, 49544, 131685, 24390],
+              "tw_chunghwa":    [3462, 9924, 18041, 131390, 17709],
+              "sg_singtel":     [3758, 9657, 8649, 24514, 132613],
+              "jp_ntt":         [2516, 4713, 17676, 2497, 7506, 9605, 17557],
+              "jp_hosting":     [7521, 2527, 4685, 7649, 4694, 9419],
+              "kr_kt":          [4766, 9644, 17858, 38661, 131279],
+              "kr_cloud":       [23576, 45996, 9318, 17858],
+              # 国际云全球节点 (ASN 补充)
+              "oracle_global":  [31898, 46521, 136120],
+              "ibm_cloud":      [36351, 13884, 16807],
+              "digitalocean":   [14061, 200130, 393406],
+              "linode":         [63949, 396539, 32475],
+              "vultr":          [20473, 64515, 7029],
+              "ovh_global":     [16276, 35540, 198203],
+              "hetzner":        [24940, 213230],
+              "contabo":        [51167, 40021],
+              "scaleway":       [12876, 199422],
+              "upcloud":        [202053, 396303],
+              "zenlayer":       [21859, 133199],
+              "cloudflare":     [13335, 209242],
+              "leaseweb":       [60781, 28753, 199524],
+              "equinix":        [24115, 54825],
+              "cogent":         [174],
+              "telia":          [1299],
+              "hurricane":      [6939],
+              # 北美大型 ISP (非云，但有企业托管 Nacos)
+              "comcast":        [7922, 33650],
+              "att":            [7018, 20057],
+              "spectrum":       [11426, 20115],
+              "centurylink":    [209, 22561, 3561],
+              "verizon":        [701, 702, 703],
+          }
+
+          def fetch_asn(asn):
+              url = f"https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS{asn}"
+              try:
+                  req = urllib.request.Request(url, headers={"User-Agent": "curl/7.88"})
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      d = json.load(r)
+                  return [x["prefix"] for x in d.get("data",{}).get("prefixes",[]) if ":" not in x["prefix"]]
+              except Exception as e:
+                  return []
+
+          all_targets = []
+          seen_asns = set()
+          summary = {}
+
+          for cloud, asns in CLOUD_ASNS.items():
+              cloud_prefixes = []
+              for asn in asns:
+                  if asn in seen_asns:
+                      continue
+                  seen_asns.add(asn)
+                  p = fetch_asn(asn)
+                  cloud_prefixes.extend(p)
+                  time.sleep(0.2)
+              cloud_prefixes = sorted(set(cloud_prefixes))
+              all_targets.extend(cloud_prefixes)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in cloud_prefixes) if cloud_prefixes else 0
+              summary[cloud] = (len(cloud_prefixes), cnt)
+
+          # ── Oracle Cloud JSON API (全球所有 region) ─────────────────
+          try:
+              url = "https://docs.oracle.com/en-us/iaas/tools/public_ip_ranges.json"
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  d = json.load(r)
+              oci = []
+              for region_data in d.get("regions", []):
+                  for cidr_data in region_data.get("cidrs", []):
+                      cidr = cidr_data.get("cidr", "")
+                      if cidr and ":" not in cidr:
+                          oci.append(cidr)
+              oci = sorted(set(oci))
+              all_targets.extend(oci)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in oci) if oci else 0
+              summary["oracle_cloud"] = (len(oci), cnt)
+          except Exception as e:
+              print(f"Oracle API error: {e}")
+
+          # ── AWS 全球 EC2 (所有 region) ───────────────────────────────
+          try:
+              url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  d = json.load(r)
+              aws_all = sorted(set(
+                  x["ip_prefix"] for x in d.get("prefixes", [])
+                  if x.get("ip_prefix") and ":" not in x["ip_prefix"]
+                  and x.get("service", "") == "EC2"
+              ))
+              all_targets.extend(aws_all)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in aws_all) if aws_all else 0
+              summary["aws_global"] = (len(aws_all), cnt)
+          except Exception as e:
+              print(f"AWS Global error: {e}")
+
+          # ── Azure 全球 (ServiceTags JSON 全部 AzureCloud.*) ──────────
+          try:
+              import re as _re
+              page_url = "https://www.microsoft.com/en-us/download/confirmation.aspx?id=56519"
+              req = urllib.request.Request(page_url, headers={"User-Agent": "curl/7.88"})
+              with urllib.request.urlopen(req, timeout=20) as r:
+                  html = r.read().decode("utf-8", errors="ignore")
+              m = _re.search(r'https://download\.microsoft\.com/download/[^"\']+ServiceTags_Public_\d+\.json', html)
+              if m:
+                  with urllib.request.urlopen(m.group(0), timeout=60) as r:
+                      d = json.load(r)
+                  azure_all = []
+                  for val in d.get("values", []):
+                      name = val.get("name", "")
+                      if not name.startswith("AzureCloud"):
+                          continue
+                      for prefix in val.get("properties", {}).get("addressPrefixes", []):
+                          if ":" not in prefix:
+                              azure_all.append(prefix)
+                  azure_all = sorted(set(azure_all))
+                  all_targets.extend(azure_all)
+                  cnt = sum(2**(32-int(c.split("/")[1])) for c in azure_all) if azure_all else 0
+                  summary["azure_global"] = (len(azure_all), cnt)
+          except Exception as e:
+              print(f"Azure Global error: {e}")
+
+          # ── GCP 全球 (JSON API) ──────────────────────────────────────
+          try:
+              url = "https://www.gstatic.com/ipranges/cloud.json"
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  d = json.load(r)
+              gcp = sorted(set(x["ipv4Prefix"] for x in d.get("prefixes", []) if x.get("ipv4Prefix")))
+              all_targets.extend(gcp)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in gcp) if gcp else 0
+              summary["gcp_global"] = (len(gcp), cnt)
+          except Exception as e:
+              print(f"GCP error: {e}")
+
+          # ── APNIC 全量 (CN + 亚太全部国家) ──────────────────────────
+          APNIC_COUNTRIES = {
+              "CN",                                           # 中国全段
+              "HK","TW","SG","JP","KR",                      # 已有
+              "AU","IN","ID","MY","TH","VN","PH",            # 其余亚太
+              "NZ","BD","PK","LK","MM","KH","LA","MN","NP",  # 南亚/东南亚
+          }
+          try:
+              url = "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
+              with urllib.request.urlopen(url, timeout=60) as r:
+                  lines = r.read().decode().splitlines()
+              apac = []
+              cc_counts = {}
+              for line in lines:
+                  parts = line.split("|")
+                  if len(parts) < 5 or parts[0] != "apnic" or parts[2] != "ipv4":
+                      continue
+                  if parts[1] not in APNIC_COUNTRIES:
+                      continue
+                  ip, count = parts[3], int(parts[4])
+                  cidr = f"{ip}/{32 - int(math.log2(count))}"
+                  apac.append(cidr)
+                  cc_counts[parts[1]] = cc_counts.get(parts[1], 0) + 1
+              apac = sorted(set(apac))
+              all_targets.extend(apac)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in apac) if apac else 0
+              summary["apnic_full"] = (len(apac), cnt)
+              for cc, n in sorted(cc_counts.items()):
+                  print(f"    {cc}: {n} CIDRs")
+          except Exception as e:
+              print(f"APNIC error: {e}")
+
+          # ── LACNIC 拉丁美洲 (BR/MX/AR/CL/CO) ───────────────────────
+          LACNIC_CC = {"BR", "MX", "AR", "CL", "CO", "PE"}
+          try:
+              url = "https://ftp.lacnic.net/pub/stats/lacnic/delegated-lacnic-latest"
+              with urllib.request.urlopen(url, timeout=60) as r:
+                  lines = r.read().decode().splitlines()
+              lacnic = []
+              for line in lines:
+                  parts = line.split("|")
+                  if len(parts) < 5 or parts[0] != "lacnic" or parts[2] != "ipv4":
+                      continue
+                  if parts[1] not in LACNIC_CC:
+                      continue
+                  ip, count = parts[3], int(parts[4])
+                  lacnic.append(f"{ip}/{32 - int(math.log2(count))}")
+              lacnic = sorted(set(lacnic))
+              all_targets.extend(lacnic)
+              cnt = sum(2**(32-int(c.split("/")[1])) for c in lacnic) if lacnic else 0
+              summary["lacnic_latam"] = (len(lacnic), cnt)
+          except Exception as e:
+              print(f"LACNIC error: {e}")
+
+          # ── Shard ─────────────────────────────────────────────────────
+          all_targets = sorted(set(all_targets))
+          my_targets = [t for i, t in enumerate(all_targets) if i % total_shards == shard_index]
+
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(my_targets))
+
+          if shard_index == 0:
+              print("\n=== Provider summary ===")
+              for cloud, (cidrs, ips) in sorted(summary.items()):
+                  if cidrs: print(f"  {cloud:20s}: {cidrs:5d} CIDRs  ~{ips:>14,} IPs")
+              total_ips_all = sum(2**(32-int(c.split("/")[1])) for c in all_targets)
+              print(f"\n  {'TOTAL':20s}: {len(all_targets):5d} CIDRs  ~{total_ips_all:>14,} IPs")
+
+          my_ips = sum(2**(32-int(c.split("/")[1])) for c in my_targets)
+          print(f"[shard {shard_index+1:02d}/{total_shards}] {len(my_targets)} CIDRs, ~{my_ips:,} IPs")
+          PY
+
+      - name: Run masscan port 8848
+        run: |
+          echo "[*] Shard ${{ matrix.shard }} | Rate: ${{ inputs.rate }} pps | CIDRs: $(wc -l < targets.txt)"
+          if [ ! -s targets.txt ]; then echo "[!] Empty shard, skip"; exit 0; fi
+          sudo masscan \
+            -iL targets.txt \
+            -p 8848 \
+            --rate "${{ inputs.rate }}" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oJ masscan_raw.json
+          echo "=== Shard ${{ matrix.shard }} open 8848: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
+
+      - name: Parse results
+        run: |
+          python3 - <<'PY'
+          import json, re, os
+
+          if not os.path.exists("masscan_raw.json"):
+              print("[!] No output"); exit(0)
+          with open("masscan_raw.json") as f:
+              raw = f.read().strip()
+          if not raw or raw == "[]":
+              print("[!] No results"); exit(0)
+          if not raw.startswith("["):
+              raw = "[" + raw.rstrip(",\n") + "]"
+          try:
+              data = json.loads(raw)
+          except:
+              matches = re.findall(r'"ip":\s*"([\d.]+)".*?"port":\s*(\d+)', raw, re.DOTALL)
+              data = [{"ip": ip, "ports": [{"port": int(p)}]} for ip, p in matches]
+
+          hosts = set(entry["ip"] for entry in data if entry.get("ip"))
+          lines = [f"{ip}:8848" for ip in sorted(hosts)]
+          with open("masscan_results.json","w") as f:
+              json.dump([{"ip":ip} for ip in sorted(hosts)], f, indent=2)
+          with open("open_ports.txt","w") as f:
+              f.write("\n".join(lines))
+          print(f"[done] shard=${{ matrix.shard }} → {len(hosts)} hosts")
+          for ip in sorted(hosts)[:10]: print(f"  {ip}:8848")
+          PY
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-cloud-8848-shard-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            masscan_raw.json
+            masscan_results.json
+            open_ports.txt
+            targets.txt
+          retention-days: 5

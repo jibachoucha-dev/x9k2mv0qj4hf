@@ -1,0 +1,130 @@
+name: amazon-masscan-8848
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'Packets per second'
+        default: '500000'
+      regions:
+        description: 'AWS regions to filter (comma-separated, empty=all)'
+        default: ''
+      services:
+        description: 'AWS services to filter (EC2,AMAZON, etc., empty=EC2 only)'
+        default: 'EC2'
+
+jobs:
+  masscan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+
+      - name: Fetch AWS IP ranges
+        run: |
+          python3 - <<'PY'
+          import urllib.request, json
+
+          url = "https://ip-ranges.amazonaws.com/ip-ranges.json"
+          with urllib.request.urlopen(url, timeout=30) as r:
+              data = json.load(r)
+
+          regions_filter = "${{ inputs.regions }}".strip()
+          filter_regions = set(x.strip() for x in regions_filter.split(",") if x.strip()) if regions_filter else None
+
+          svc_str = "${{ inputs.services }}".strip()
+          filter_services = set(s.strip().upper() for s in svc_str.split(",") if s.strip()) if svc_str else None
+
+          prefixes = []
+          region_counts = {}
+          for item in data.get("prefixes", []):
+              cidr = item.get("ip_prefix")
+              if not cidr:
+                  continue
+              region = item.get("region", "")
+              service = item.get("service", "")
+              if filter_regions and region not in filter_regions:
+                  continue
+              if filter_services and service.upper() not in filter_services:
+                  continue
+              prefixes.append(cidr)
+              region_counts[region] = region_counts.get(region, 0) + 1
+
+          prefixes = sorted(set(prefixes))
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(prefixes))
+
+          total = sum(2**(32-int(c.split("/")[1])) for c in prefixes)
+          print(f"[*] AWS IPv4 CIDRs: {len(prefixes)}, ~{total:,} IPs")
+          for region, cnt in sorted(region_counts.items()):
+              print(f"  {region}: {cnt} CIDRs")
+          PY
+          head -5 targets.txt
+
+      - name: Run masscan port 8848
+        run: |
+          echo "[*] Rate: ${{ inputs.rate }} pps"
+          echo "[*] Targets: $(wc -l < targets.txt) CIDRs"
+          sudo masscan \
+            -iL targets.txt \
+            -p 8848 \
+            --rate "${{ inputs.rate }}" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oJ masscan_raw.json
+          echo "=== Open 8848: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
+
+      - name: Parse results
+        run: |
+          python3 - <<'PY'
+          import json, re
+
+          with open("masscan_raw.json") as f:
+              raw = f.read().strip()
+
+          if not raw or raw == "[]":
+              print("[!] No results"); exit(0)
+          if not raw.startswith("["):
+              raw = "[" + raw.rstrip(",\n") + "]"
+
+          try:
+              data = json.loads(raw)
+          except:
+              matches = re.findall(r'"ip":\s*"([\d.]+)".*?"port":\s*(\d+)', raw, re.DOTALL)
+              data = [{"ip": ip, "ports": [{"port": int(p)}]} for ip, p in matches]
+
+          hosts = {}
+          for entry in data:
+              ip = entry.get("ip")
+              if not ip: continue
+              for p in entry.get("ports", []):
+                  hosts.setdefault(ip, set()).add(str(p.get("port", "")))
+
+          results, lines = [], []
+          for ip, ports in sorted(hosts.items()):
+              ports = sorted(ports, key=int)
+              results.append({"ip": ip, "open_ports": ports})
+              for port in ports:
+                  lines.append(f"{ip}:{port}")
+
+          with open("masscan_results.json", "w") as f:
+              json.dump(results, f, indent=2)
+          with open("open_ports.txt", "w") as f:
+              f.write("\n".join(lines))
+
+          print(f"[done] {len(hosts)} hosts with port 8848 open")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amazon-masscan-8848-${{ github.run_id }}
+          path: |
+            masscan_raw.json
+            masscan_results.json
+            open_ports.txt
+            targets.txt
+          retention-days: 5

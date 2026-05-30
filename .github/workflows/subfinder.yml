@@ -1,0 +1,65 @@
+name: subfinder
+on:
+  workflow_dispatch:
+    inputs:
+      domains:
+        description: 'Root domains (newline/comma separated)'
+        required: true
+      sources:
+        description: 'subfinder -sources (comma, leave empty for all)'
+        default: ''
+      recursive:
+        description: 'Recursive enumeration (true/false)'
+        default: 'false'
+
+jobs:
+  subfinder:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install tools
+        run: |
+          go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+          go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Prepare
+        run: |
+          echo "${{ inputs.domains }}" | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' > domains.txt
+
+      - name: Subfinder
+        run: |
+          SOURCES_ARG=""
+          if [ -n "${{ inputs.sources }}" ]; then
+            SOURCES_ARG="-sources ${{ inputs.sources }}"
+          fi
+          RECURSIVE_ARG=""
+          if [ "${{ inputs.recursive }}" = "true" ]; then
+            RECURSIVE_ARG="-recursive"
+          fi
+          subfinder -dL domains.txt -all -silent \
+            $SOURCES_ARG $RECURSIVE_ARG \
+            -o subdomains.txt
+          echo "Subdomains: $(wc -l < subdomains.txt)"
+
+      - name: Resolve with dnsx
+        run: |
+          dnsx -l subdomains.txt -silent -a -resp \
+            -o resolved.txt
+          echo "Resolved: $(wc -l < resolved.txt)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: subfinder-${{ github.run_id }}
+          path: |
+            subdomains.txt
+            resolved.txt
+          retention-days: 7

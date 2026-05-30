@@ -1,0 +1,108 @@
+name: cn-masscan-8848
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'Packets per second'
+        default: '1000000'
+
+jobs:
+  masscan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install masscan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+
+      - name: Fetch China IP ranges (APNIC)
+        run: |
+          echo "[*] Downloading APNIC delegated data..."
+          curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
+            | grep "^apnic|CN|ipv4|" > cn_raw.txt
+          echo "[*] Raw CN lines: $(wc -l < cn_raw.txt)"
+
+          python3 - <<'PY'
+          import math
+          cidrs = []
+          with open("cn_raw.txt") as f:
+              for line in f:
+                  parts = line.strip().split("|")
+                  if len(parts) < 5:
+                      continue
+                  ip = parts[3]
+                  count = int(parts[4])
+                  prefix_len = 32 - int(math.log2(count))
+                  cidrs.append(f"{ip}/{prefix_len}")
+          with open("targets.txt", "w") as f:
+              f.write("\n".join(cidrs))
+          total = sum(2**(32-int(c.split('/')[1])) for c in cidrs)
+          print(f"[*] CN IPv4 CIDRs: {len(cidrs)}, total IPs: ~{total:,}")
+          PY
+          head -5 targets.txt
+
+      - name: Run masscan
+        run: |
+          # 覆盖 es_mongo_count_linux 全部支持的服务端口
+          PORTS="9200,9300,27017,6379,7474,7687,8848,2181,15672,9092,61616,8161,2375,2376,5601,8088,50070,8089,5985,5986,1433,3389,2049,111,873,5900,1099,4848,7077,8009,4000,7001,7002,9876,20880,9999,8090,8983,9090,8080,8443,8161,50030,50060,10911,10912"
+          echo "[*] Scanning ports: $PORTS"
+          echo "[*] Rate: ${{ inputs.rate }} pps"
+          sudo masscan \
+            -iL targets.txt \
+            -p "$PORTS" \
+            --rate "${{ inputs.rate }}" \
+            --wait 5 \
+            --exclude 255.255.255.255 \
+            -oJ masscan_raw.json
+          echo "=== Open ports: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
+
+      - name: Parse results
+        run: |
+          python3 - <<'PY'
+          import json
+
+          try:
+              with open("masscan_raw.json") as f:
+                  raw = f.read().strip()
+              if not raw or raw in ('', '[]'):
+                  print("[!] No results"); exit(0)
+              if not raw.startswith('['):
+                  raw = '[' + raw.rstrip(',\n') + ']'
+              data = json.loads(raw)
+          except Exception as e:
+              print(f"Parse error: {e}"); data = []
+
+          hosts = {}
+          for entry in data:
+              ip = entry.get("ip")
+              if not ip: continue
+              for p in entry.get("ports", []):
+                  hosts.setdefault(ip, []).append(str(p.get("port","")))
+
+          results, lines = [], []
+          for ip, ports in sorted(hosts.items()):
+              ports = sorted(set(ports))
+              results.append({"ip": ip, "open_ports": ports})
+              for port in ports:
+                  lines.append(f"{ip}:{port}")
+
+          with open("masscan_results.json","w") as f:
+              json.dump(results, f, indent=2)
+          with open("open_ports.txt","w") as f:
+              f.write("\n".join(lines))
+
+          print(f"[done] {len(hosts)} hosts, {len(lines)} open ports")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cn-masscan-8848-${{ github.run_id }}
+          path: |
+            masscan_raw.json
+            masscan_results.json
+            open_ports.txt
+            targets.txt
+          retention-days: 5

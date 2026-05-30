@@ -1,0 +1,69 @@
+name: ffuf-fuzz
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Target URL with FUZZ placeholder (e.g. https://target.com/FUZZ)'
+        required: true
+      wordlist:
+        description: 'SecLists path (relative to SecLists root)'
+        default: 'Discovery/Web-Content/common.txt'
+      mc:
+        description: 'Match status codes'
+        default: '200,201,202,204,301,302,307,401,403'
+      rate:
+        description: 'Requests per second'
+        default: '100'
+      extensions:
+        description: 'File extensions to append (e.g. .php,.bak)'
+        default: ''
+
+jobs:
+  ffuf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install ffuf
+        run: |
+          go install -v github.com/ffuf/ffuf/v2@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Fetch wordlist
+        run: |
+          mkdir -p wordlists
+          curl -sL "https://raw.githubusercontent.com/danielmiessler/SecLists/master/${{ inputs.wordlist }}" \
+            -o wordlists/list.txt
+          echo "Wordlist size: $(wc -l < wordlists/list.txt)"
+          head -5 wordlists/list.txt
+
+      - name: Run ffuf
+        run: |
+          EXT_ARG=""
+          if [ -n "${{ inputs.extensions }}" ]; then
+            EXT_ARG="-e ${{ inputs.extensions }}"
+          fi
+
+          ffuf -u "${{ inputs.url }}" \
+            -w wordlists/list.txt \
+            -mc "${{ inputs.mc }}" \
+            -rate "${{ inputs.rate }}" \
+            -t 40 \
+            -timeout 10 \
+            $EXT_ARG \
+            -o ffuf_results.json -of json \
+            -s || true
+
+          echo "=== Hits: $(jq '.results | length' ffuf_results.json 2>/dev/null || echo 0) ==="
+          jq -r '.results[] | "\(.status) \(.length) \(.url)"' ffuf_results.json 2>/dev/null | head -30
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ffuf-${{ github.run_id }}
+          path: ffuf_results.json
+          retention-days: 3

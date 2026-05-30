@@ -1,0 +1,70 @@
+name: httpx-fingerprint
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'Hosts or ip:port list'
+        required: true
+      threads:
+        description: 'Concurrent threads'
+        default: '50'
+      ports:
+        description: 'Extra ports to probe (comma)'
+        default: '80,443,8080,8443,8888,9090'
+
+jobs:
+  httpx:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install httpx
+        run: |
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+
+      - name: Prepare hosts
+        run: |
+          echo "${{ inputs.targets }}" \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' > hosts.txt
+          echo "Hosts: $(wc -l < hosts.txt)"
+
+      - name: Run httpx
+        run: |
+          httpx -l hosts.txt \
+            -ports "${{ inputs.ports }}" \
+            -title -tech-detect -status-code -content-length \
+            -server -ip -cdn -tls-grab -web-server \
+            -favicon -jarm \
+            -json -o httpx_results.jsonl \
+            -threads "${{ inputs.threads }}" \
+            -timeout 10 -silent
+
+          echo "=== Alive: $(wc -l < httpx_results.jsonl 2>/dev/null || echo 0) ==="
+
+      - name: Extract URLs and summary
+        run: |
+          if [ -f httpx_results.jsonl ]; then
+            jq -r '.url' httpx_results.jsonl > alive_urls.txt
+            jq -r '[.url, (.status_code|tostring), (.tech // [] | join(",")), .title] | @tsv' \
+              httpx_results.jsonl > summary.tsv 2>/dev/null || true
+            echo "Tech stack summary:"
+            jq -r '.tech // [] | .[]' httpx_results.jsonl 2>/dev/null \
+              | sort | uniq -c | sort -rn | head -20
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: httpx-${{ github.run_id }}
+          path: |
+            httpx_results.jsonl
+            alive_urls.txt
+            summary.tsv
+          retention-days: 3

@@ -1,0 +1,105 @@
+name: masscan
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: 'IP/CIDR list (newline or comma separated)'
+        required: true
+      ports:
+        description: 'Port range/list'
+        default: '8848,80,443,8080,8443,22,21,3389,6379,9200,7474,27017,3306,5432,5601,8888,9090,9000,8000,11211,2375,2376,2379,5984,9042,9300,15672,50070,2181,9092,61616,8161,4848,7001,7002,9876,20880'
+      rate:
+        description: 'Packets per second (1000-10000 recommended)'
+        default: '2000'
+      excludes:
+        description: 'Exclude CIDR (comma-separated, optional)'
+        default: ''
+
+jobs:
+  masscan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Install masscan
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan
+
+      - name: Prepare targets
+        run: |
+          echo "${{ inputs.targets }}" \
+            | tr ',' '\n' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
+            | grep -v '^$' > targets.txt
+          echo "=== Target count: $(wc -l < targets.txt) ==="
+          head -20 targets.txt
+
+      - name: Run masscan
+        run: |
+          EXCLUDE_ARG=""
+          if [ -n "${{ inputs.excludes }}" ]; then
+            EXCLUDE_ARG="--exclude ${{ inputs.excludes }}"
+          fi
+          sudo masscan \
+            -iL targets.txt \
+            -p "${{ inputs.ports }}" \
+            --rate "${{ inputs.rate }}" \
+            --wait 3 \
+            $EXCLUDE_ARG \
+            -oJ masscan_raw.json
+          echo "=== Open ports found: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
+
+      - name: Parse and aggregate
+        run: |
+          python3 - <<'PY'
+          import json, re
+
+          # masscan -oJ output is sometimes malformed JSON (trailing comma, no wrapper)
+          try:
+              with open("masscan_raw.json") as f:
+                  raw = f.read().strip()
+              if not raw.startswith('['):
+                  raw = '[' + raw.rstrip(',').rstrip() + ']'
+              data = json.loads(raw)
+          except Exception as e:
+              print(f"Parse error: {e}")
+              data = []
+
+          hosts = {}
+          for entry in data:
+              ip = entry.get("ip")
+              if not ip:
+                  continue
+              for p in entry.get("ports", []):
+                  port = p.get("port")
+                  proto = p.get("proto", "tcp")
+                  hosts.setdefault(ip, []).append(f"{proto}/{port}")
+
+          results = []
+          ip_port_lines = []
+          for ip, ports in sorted(hosts.items()):
+              ports_sorted = sorted(set(ports))
+              results.append({"ip": ip, "open_ports": ports_sorted})
+              for pp in ports_sorted:
+                  port_num = pp.split("/")[1]
+                  ip_port_lines.append(f"{ip}:{port_num}")
+              print(f"{ip:18s}  {', '.join(ports_sorted)}")
+
+          with open("masscan_results.json", "w") as f:
+              json.dump(results, f, indent=2)
+          with open("open_ports.txt", "w") as f:
+              f.write("\n".join(ip_port_lines))
+
+          print(f"\n=== Summary: {len(hosts)} hosts, {sum(len(p) for p in hosts.values())} open ports ===")
+          PY
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: masscan-${{ github.run_id }}
+          path: |
+            masscan_raw.json
+            masscan_results.json
+            open_ports.txt
+          retention-days: 3

