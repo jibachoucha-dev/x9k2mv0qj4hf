@@ -1,16 +1,14 @@
-name: nas-scan-pipeline
+name: c4d4adaacdb3e6c2
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'masscan pps per shard'
         default: '500000'
       shards:
-        description: 'parallel shards'
         default: '20'
 
 jobs:
-  scan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -19,7 +17,7 @@ jobs:
         shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
 
     steps:
-      - name: Install tools
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3 nmap
@@ -28,7 +26,7 @@ jobs:
         env:
           GOPATH: /home/runner/go
 
-      - name: Fetch CN IPs and split shard
+      - name: s1
         run: |
           curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
             | grep "^apnic|CN|ipv4|" > cn_raw.txt
@@ -48,25 +46,20 @@ jobs:
           print(f"Shard {shard_id}/{total}: {len(my)} CIDRs ~{sum(2**(32-int(c.split('/')[1])) for c in my):,} IPs")
           PY
 
-      - name: masscan NAS ports
+      - name: s2
         run: |
-          # NAS Web: 80,443,5000,5001(Synology),8080,8443,8181(TerraMaster),8000,8001(Asustor)
-          # Dahua TCP private: 37777
-          # Telnet (CVE-2026-32746 Synology): 23
-          # SMB (CVE-2021-44142 Synology Samba): 445
           PORTS="23,80,443,445,5000,5001,8000,8001,8080,8181,8443,37777"
           sudo masscan -iL targets.txt -p "$PORTS" \
             --rate "${{ inputs.rate }}" --wait 5 \
             --exclude 255.255.255.255 -oL masscan_list.txt 2>/dev/null || true
           grep '^open' masscan_list.txt | awk '{print $4":"$3}' | sort -u > open_ports.txt
-          # split by protocol for specialized probers
           grep '^open' masscan_list.txt | awk '$3=="23"  {print $4}' | sort -u > telnet_targets.txt
           grep '^open' masscan_list.txt | awk '$3=="445" {print $4}' | sort -u > smb_targets.txt
           grep '^open' masscan_list.txt | awk '$3=="37777" {print $4}' | sort -u > dahua_tcp_targets.txt
           grep '^open' masscan_list.txt | awk '$3~/^(80|443|5000|5001|8000|8001|8080|8181|8443)$/ {print $4":"$3}' | sort -u > http_candidates.txt
           echo "open=$(wc -l < open_ports.txt) http=$(wc -l < http_candidates.txt) telnet=$(wc -l < telnet_targets.txt) smb=$(wc -l < smb_targets.txt) dahua_tcp=$(wc -l < dahua_tcp_targets.txt)"
 
-      - name: httpx — fingerprint NAS web UI
+      - name: s3
         run: |
           [ -s http_candidates.txt ] || { touch nas_live.jsonl; exit 0; }
           $HOME/go/bin/httpx -l http_candidates.txt \
@@ -92,7 +85,7 @@ jobs:
           print(f'NAS web UIs identified: {len(hits)}')
           "
 
-      - name: Go — Telnet probe (CVE-2026-32746 Synology telnetd)
+      - name: s4
         run: |
           [ -s telnet_targets.txt ] || exit 0
           cat > /tmp/telnet_probe.go << 'GOEOF'
@@ -187,7 +180,7 @@ jobs:
           GOEOF
           go run /tmp/telnet_probe.go telnet_targets.txt telnet_vulns.jsonl
 
-      - name: Go — SMB probe (CVE-2021-44142 Synology Samba vfs_fruit)
+      - name: s5
         run: |
           [ -s smb_targets.txt ] || exit 0
           cat > /tmp/smb_probe.go << 'GOEOF'
@@ -299,7 +292,7 @@ jobs:
           GOEOF
           go run /tmp/smb_probe.go smb_targets.txt smb_vulns.jsonl
 
-      - name: Go — Dahua TCP37777 probe (CVE-2021-33044/45)
+      - name: s6
         run: |
           [ -s dahua_tcp_targets.txt ] || exit 0
           cat > /tmp/dahua_tcp.go << 'GOEOF'
@@ -395,7 +388,7 @@ jobs:
           GOEOF
           go run /tmp/dahua_tcp.go dahua_tcp_targets.txt dahua_tcp_vulns.jsonl
 
-      - name: Go — HTTP NAS CVE checker (all Tier-1 + Tier-2)
+      - name: s7
         run: |
           cat > /tmp/nas_cve.go << 'GOEOF'
           package main
@@ -880,13 +873,11 @@ jobs:
             fmt.Fprintf(os.Stderr, "NAS vulnerable hosts: %d\n", count)
           }
           GOEOF
-          # Build target list: httpx fingerprinted + fallback raw http candidates
           cp nas_live.jsonl nas_check.jsonl 2>/dev/null || true
-          # Also check all raw HTTP candidates that httpx missed
           awk '{print "{\"url\":\"http://"$0"\"}"}' http_candidates.txt >> nas_check.jsonl
           go run /tmp/nas_cve.go nas_check.jsonl http_vulns.jsonl
 
-      - name: Upload shard results
+      - name: s8
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -900,18 +891,18 @@ jobs:
             dahua_tcp_vulns.jsonl
           retention-days: 7
 
-  merge:
+  j2:
     runs-on: ubuntu-latest
-    needs: scan
+    needs: j1
     if: always()
     steps:
-      - name: Download all shards
+      - name: s0
         uses: actions/download-artifact@v4
         with:
           pattern: nas-shard-*
           merge-multiple: false
 
-      - name: Merge and report
+      - name: s1
         run: |
           mkdir -p merged
           cat nas-shard-*/open_ports.txt    2>/dev/null | sort -u > merged/open_ports_all.txt
@@ -978,7 +969,7 @@ jobs:
           [print(f'{n:5d} {k}') for k,n in c.most_common()]
           " 2>/dev/null
 
-      - name: Upload merged
+      - name: s2
         uses: actions/upload-artifact@v4
         with:
           name: nas-merged-${{ github.run_id }}

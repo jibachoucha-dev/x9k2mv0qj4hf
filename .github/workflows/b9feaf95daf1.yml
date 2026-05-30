@@ -1,25 +1,23 @@
-name: google-masscan-8848
+name: 28b010b24bcdeeaf
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'Packets per second'
         default: '500000'
       regions:
-        description: 'GCP regions to filter (comma-separated, empty=all)'
         default: ''
 
 jobs:
-  masscan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Install tools
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3
 
-      - name: Fetch Google Cloud IP ranges
+      - name: s1
         run: |
           python3 - <<'PY'
           import urllib.request, json
@@ -50,7 +48,7 @@ jobs:
           PY
           head -5 targets.txt
 
-      - name: Run masscan port 8848
+      - name: s2
         run: |
           echo "[*] Rate: ${{ inputs.rate }} pps"
           echo "[*] Targets: $(wc -l < targets.txt) CIDRs"
@@ -63,7 +61,7 @@ jobs:
             -oJ masscan_raw.json
           echo "=== Open 8848: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
 
-      - name: Parse results
+      - name: s3
         run: |
           python3 - <<'PY'
           import json, re
@@ -104,7 +102,7 @@ jobs:
           print(f"[done] {len(hosts)} hosts with port 8848 open")
           PY
 
-      - name: Upload artifacts
+      - name: s4
         if: always()
         uses: actions/upload-artifact@v4
         with:

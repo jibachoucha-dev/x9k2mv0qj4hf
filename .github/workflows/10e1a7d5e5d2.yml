@@ -1,40 +1,37 @@
-name: subfinder
+name: aee739e51fd889cb
 on:
   workflow_dispatch:
     inputs:
       domains:
-        description: 'Root domains (newline/comma separated)'
         required: true
       sources:
-        description: 'subfinder -sources (comma, leave empty for all)'
         default: ''
       recursive:
-        description: 'Recursive enumeration (true/false)'
         default: 'false'
 
 jobs:
-  subfinder:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Setup Go
+      - name: s0
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install tools
+      - name: s1
         run: |
           go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
           go install github.com/projectdiscovery/dnsx/cmd/dnsx@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Prepare
+      - name: s2
         run: |
           echo "${{ inputs.domains }}" | tr ',' '\n' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
             | grep -v '^$' > domains.txt
 
-      - name: Subfinder
+      - name: s3
         run: |
           SOURCES_ARG=""
           if [ -n "${{ inputs.sources }}" ]; then
@@ -49,7 +46,7 @@ jobs:
             -o subdomains.txt
           echo "Subdomains: $(wc -l < subdomains.txt)"
 
-      - name: Resolve with dnsx
+      - name: s4
         run: |
           dnsx -l subdomains.txt -silent -a -resp \
             -o resolved.txt

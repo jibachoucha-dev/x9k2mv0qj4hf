@@ -1,34 +1,29 @@
-name: full-recon-pipeline
+name: b6189a7e7061b552
 on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Domain or IP/CIDR list (newline/comma separated)'
         required: true
       mode:
-        description: 'subdomain (for domains) or portscan (for IPs)'
         default: 'subdomain'
       ports:
-        description: 'For portscan mode'
         default: '80,443,8080,8443,7474,9200,6379,27017,5601,8888,9000,11211,2375,5984'
       rate:
-        description: 'masscan rate'
         default: '2000'
       nuclei_tags:
-        description: 'nuclei template tags'
         default: 'exposure,misconfig,cve,default-login,takeover'
 
 jobs:
-  pipeline:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Setup Go
+      - name: s0
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install tools
+      - name: s1
         run: |
           sudo apt-get install -y -qq masscan
           go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
@@ -36,18 +31,17 @@ jobs:
           go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Update nuclei templates
+      - name: s2
         run: nuclei -update-templates -silent
 
-      - name: Prepare input
+      - name: s3
         run: |
           echo "${{ inputs.targets }}" | tr ',' '\n' \
             | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' \
             | grep -v '^$' > input.txt
           echo "Input lines: $(wc -l < input.txt)"
 
-      # ── Stage A (subdomain mode): subfinder → URLs ───────────────────
-      - name: Subfinder (domain mode)
+      - name: s4
         if: inputs.mode == 'subdomain'
         run: |
           while read -r domain; do
@@ -55,8 +49,7 @@ jobs:
           done < input.txt | sort -u > stage1_hosts.txt
           echo "Subdomains found: $(wc -l < stage1_hosts.txt)"
 
-      # ── Stage A (portscan mode): masscan → ip:port ──────────────────
-      - name: Masscan (IP mode)
+      - name: s5
         if: inputs.mode == 'portscan'
         run: |
           sudo masscan -iL input.txt \
@@ -66,8 +59,7 @@ jobs:
           grep '^open' masscan.list | awk '{print $4":"$3}' > stage1_hosts.txt
           echo "Open services: $(wc -l < stage1_hosts.txt)"
 
-      # ── Stage B: httpx fingerprint ──────────────────────────────────
-      - name: httpx
+      - name: s6
         run: |
           httpx -l stage1_hosts.txt \
             -title -tech-detect -status-code -server -ip -cdn -tls-grab \
@@ -76,8 +68,7 @@ jobs:
           jq -r '.url' httpx.jsonl > alive_urls.txt 2>/dev/null || touch alive_urls.txt
           echo "Alive HTTP: $(wc -l < alive_urls.txt)"
 
-      # ── Stage C: nuclei ─────────────────────────────────────────────
-      - name: nuclei
+      - name: s7
         if: hashFiles('alive_urls.txt') != ''
         run: |
           nuclei -l alive_urls.txt \
@@ -88,8 +79,7 @@ jobs:
             -stats -silent || true
           echo "Findings: $(wc -l < nuclei.jsonl 2>/dev/null || echo 0)"
 
-      # ── Bundle ──────────────────────────────────────────────────────
-      - name: Bundle results
+      - name: s8
         if: always()
         run: |
           tar czf pipeline-${{ github.run_id }}.tar.gz \

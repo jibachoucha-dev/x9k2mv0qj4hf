@@ -1,13 +1,12 @@
-name: global-scan
+name: bbe366e8370561b4
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'pps per shard'
         default: '1000000'
 
 jobs:
-  scan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -15,11 +14,11 @@ jobs:
       matrix:
         shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     steps:
-      - name: Setup
+      - name: s0
         run: |
           sudo apt-get update -qq && sudo apt-get install -y masscan
 
-      - name: Masscan
+      - name: s1
         run: |
           sudo masscan 0.0.0.0/0 \
             --excludefile <(echo "10.0.0.0/8"; echo "172.16.0.0/12"; echo "192.168.0.0/16"; echo "100.64.0.0/10"; echo "127.0.0.0/8"; echo "169.254.0.0/16"; echo "224.0.0.0/4"; echo "240.0.0.0/4") \
@@ -29,7 +28,7 @@ jobs:
             --shard $((1 + ${{ matrix.shard }}))/20 \
             --wait 15 -oJ results.json 2>&1 | tail -10
 
-      - name: Stats
+      - name: s2
         run: |
           echo "Total lines: $(wc -l < results.json)"
           for p in 6379 27017 9200 8848; do
@@ -37,7 +36,7 @@ jobs:
             echo "Port $p: $c"
           done
 
-      - name: Upload
+      - name: s3
         uses: actions/upload-artifact@v4
         with:
           name: s-${{ matrix.shard }}

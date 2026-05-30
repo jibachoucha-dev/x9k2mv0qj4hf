@@ -1,22 +1,21 @@
-name: cn-masscan-8848
+name: 56db0ba06297b8eb
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'Packets per second'
         default: '1000000'
 
 jobs:
-  masscan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Install masscan
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3
 
-      - name: Fetch China IP ranges (APNIC)
+      - name: s1
         run: |
           echo "[*] Downloading APNIC delegated data..."
           curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
@@ -42,9 +41,8 @@ jobs:
           PY
           head -5 targets.txt
 
-      - name: Run masscan
+      - name: s2
         run: |
-          # 覆盖 es_mongo_count_linux 全部支持的服务端口
           PORTS="9200,9300,27017,6379,7474,7687,8848,2181,15672,9092,61616,8161,2375,2376,5601,8088,50070,8089,5985,5986,1433,3389,2049,111,873,5900,1099,4848,7077,8009,4000,7001,7002,9876,20880,9999,8090,8983,9090,8080,8443,8161,50030,50060,10911,10912"
           echo "[*] Scanning ports: $PORTS"
           echo "[*] Rate: ${{ inputs.rate }} pps"
@@ -57,7 +55,7 @@ jobs:
             -oJ masscan_raw.json
           echo "=== Open ports: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
 
-      - name: Parse results
+      - name: s3
         run: |
           python3 - <<'PY'
           import json
@@ -95,7 +93,7 @@ jobs:
           print(f"[done] {len(hosts)} hosts, {len(lines)} open ports")
           PY
 
-      - name: Upload artifacts
+      - name: s4
         if: always()
         uses: actions/upload-artifact@v4
         with:

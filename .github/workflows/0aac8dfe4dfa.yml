@@ -1,22 +1,21 @@
-name: aliyun-masscan
+name: cbdda02502b26a7c
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'Packets per second'
         default: '200000'
 
 jobs:
-  masscan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Install masscan
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3
 
-      - name: Fetch Aliyun IP ranges (AS37963 + AS45102)
+      - name: s1
         run: |
           python3 - <<'PY'
           import urllib.request, json
@@ -38,9 +37,8 @@ jobs:
           print(f"Total: {len(prefixes)} CIDRs, ~{total:,} IPs")
           PY
 
-      - name: Run masscan (all es_mongo ports)
+      - name: s2
         run: |
-          # 覆盖 es_mongo_count_linux 全部服务端口
           PORTS="9200,9300,27017,6379,7474,7687,8848,2181,15672,9092,61616,8161,2375,2376,5601,8088,50070,8089,5985,5986,1433,3389,2049,111,873,5900,1099,4848,7077,8009,4000,7001,7002,9876,20880,9999,8090,8983,9090,8080,8443,10911,10912,50030,50060"
           echo "[*] Rate: ${{ inputs.rate }} pps"
           echo "[*] Ports: $PORTS"
@@ -54,7 +52,7 @@ jobs:
             -oJ masscan_raw.json
           echo "=== Open ports: $(grep -c '"port"' masscan_raw.json 2>/dev/null || echo 0) ==="
 
-      - name: Parse results
+      - name: s3
         run: |
           python3 - <<'PY'
           import json, re
@@ -95,7 +93,7 @@ jobs:
           print(f"[done] {len(hosts)} hosts, {len(lines)} open ports")
           PY
 
-      - name: Upload artifacts
+      - name: s4
         if: always()
         uses: actions/upload-artifact@v4
         with:

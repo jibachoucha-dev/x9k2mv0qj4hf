@@ -1,15 +1,12 @@
-name: b7Tz3wRn
+name: c8031af449dc1d52
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'r'
         default: '300000'
       threads:
-        description: 't'
         default: '200'
       shards:
-        description: 's'
         default: '20'
 
 jobs:

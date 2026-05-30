@@ -1,33 +1,30 @@
-name: httpx-fingerprint
+name: 6b5993851b57771f
 on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Hosts or ip:port list'
         required: true
       threads:
-        description: 'Concurrent threads'
         default: '50'
       ports:
-        description: 'Extra ports to probe (comma)'
         default: '80,443,8080,8443,8888,9090'
 
 jobs:
-  httpx:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Setup Go
+      - name: s0
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install httpx
+      - name: s1
         run: |
           go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Prepare hosts
+      - name: s2
         run: |
           echo "${{ inputs.targets }}" \
             | tr ',' '\n' \
@@ -35,7 +32,7 @@ jobs:
             | grep -v '^$' > hosts.txt
           echo "Hosts: $(wc -l < hosts.txt)"
 
-      - name: Run httpx
+      - name: s3
         run: |
           httpx -l hosts.txt \
             -ports "${{ inputs.ports }}" \
@@ -48,7 +45,7 @@ jobs:
 
           echo "=== Alive: $(wc -l < httpx_results.jsonl 2>/dev/null || echo 0) ==="
 
-      - name: Extract URLs and summary
+      - name: s4
         run: |
           if [ -f httpx_results.jsonl ]; then
             jq -r '.url' httpx_results.jsonl > alive_urls.txt

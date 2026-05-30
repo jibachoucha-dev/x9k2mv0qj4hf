@@ -1,12 +1,10 @@
-name: xK9mPq2v
+name: 81f1368563e11159
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'r'
         default: '1000000'
       shards:
-        description: 's'
         default: '20'
 
 jobs:

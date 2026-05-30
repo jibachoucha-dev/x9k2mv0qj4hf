@@ -1,42 +1,37 @@
-name: nuclei-scan
+name: 70fe38e43e958ca1
 on:
   workflow_dispatch:
     inputs:
       targets:
-        description: 'Target URLs (newline or comma separated)'
         required: true
       tags:
-        description: 'Template tags (comma-separated)'
         default: 'cve,exposure,misconfig,default-login,takeover'
       severity:
-        description: 'Severity filter'
         default: 'medium,high,critical'
       rate_limit:
-        description: 'Requests per second'
         default: '50'
       concurrency:
-        description: 'Concurrent templates'
         default: '25'
 
 jobs:
-  nuclei:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     steps:
-      - name: Setup Go
+      - name: s0
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install nuclei
+      - name: s1
         run: |
           go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Update templates
+      - name: s2
         run: nuclei -update-templates -silent
 
-      - name: Prepare targets
+      - name: s3
         run: |
           echo "${{ inputs.targets }}" \
             | tr ',' '\n' \
@@ -44,7 +39,7 @@ jobs:
             | grep -v '^$' > targets.txt
           echo "Targets: $(wc -l < targets.txt)"
 
-      - name: Run nuclei
+      - name: s4
         run: |
           nuclei -l targets.txt \
             -tags "${{ inputs.tags }}" \
@@ -55,13 +50,12 @@ jobs:
             -stats -silent || true
 
           echo "=== Findings: $(wc -l < nuclei_results.jsonl 2>/dev/null || echo 0) ==="
-          # Quick summary
           if [ -f nuclei_results.jsonl ]; then
             jq -r '.info.severity' nuclei_results.jsonl 2>/dev/null \
               | sort | uniq -c | sort -rn || true
           fi
 
-      - name: Generate summary
+      - name: s5
         if: always()
         run: |
           python3 - <<'PY'

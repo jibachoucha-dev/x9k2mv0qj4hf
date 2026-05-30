@@ -1,39 +1,34 @@
-name: ffuf-fuzz
+name: 682c683cc65d8a9a
 on:
   workflow_dispatch:
     inputs:
       url:
-        description: 'Target URL with FUZZ placeholder (e.g. https://target.com/FUZZ)'
         required: true
       wordlist:
-        description: 'SecLists path (relative to SecLists root)'
         default: 'Discovery/Web-Content/common.txt'
       mc:
-        description: 'Match status codes'
         default: '200,201,202,204,301,302,307,401,403'
       rate:
-        description: 'Requests per second'
         default: '100'
       extensions:
-        description: 'File extensions to append (e.g. .php,.bak)'
         default: ''
 
 jobs:
-  ffuf:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 180
     steps:
-      - name: Setup Go
+      - name: s0
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
-      - name: Install ffuf
+      - name: s1
         run: |
           go install -v github.com/ffuf/ffuf/v2@latest
           echo "$HOME/go/bin" >> $GITHUB_PATH
 
-      - name: Fetch wordlist
+      - name: s2
         run: |
           mkdir -p wordlists
           curl -sL "https://raw.githubusercontent.com/danielmiessler/SecLists/master/${{ inputs.wordlist }}" \
@@ -41,7 +36,7 @@ jobs:
           echo "Wordlist size: $(wc -l < wordlists/list.txt)"
           head -5 wordlists/list.txt
 
-      - name: Run ffuf
+      - name: s3
         run: |
           EXT_ARG=""
           if [ -n "${{ inputs.extensions }}" ]; then

@@ -1,13 +1,12 @@
-name: redis-mongo-es
+name: 592bb80680bcecdc
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'pps per shard'
         default: '500000'
 
 jobs:
-  scan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 350
     strategy:
@@ -15,7 +14,7 @@ jobs:
       matrix:
         shard: [0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19]
     steps:
-      - name: Setup
+      - name: s0
         run: |
           sudo apt-get update -qq && sudo apt-get install -y masscan
           curl -s "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
@@ -37,13 +36,13 @@ jobs:
           print(f'Shard {shard}: {len(chunk)} CIDRs')
           "
 
-      - name: Masscan
+      - name: s1
         run: |
           sudo masscan -iL targets.txt -p6379,27017,9200 \
             --rate ${{ inputs.rate }} \
             --wait 10 -oJ results.json 2>&1 | tail -5
 
-      - name: Upload
+      - name: s2
         uses: actions/upload-artifact@v4
         with:
           name: s-${{ matrix.shard }}

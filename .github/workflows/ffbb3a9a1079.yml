@@ -1,24 +1,23 @@
-name: cn-socks5-scan
+name: 6c1b2118d104a10b
 on:
   workflow_dispatch:
     inputs:
       rate:
-        description: 'Packets per second'
         default: '2000000'
-  schedule:
-    - cron: '15 * * * *'     # every 60 minutes — keep proxy list fresh
+  j2:
+    - cron: '15 * * * *'
 
 jobs:
-  masscan:
+  j1:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Install masscan
+      - name: s0
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y masscan python3
 
-      - name: Fetch China IP ranges (APNIC)
+      - name: s1
         run: |
           curl -s --max-time 60 "https://ftp.apnic.net/stats/apnic/delegated-apnic-latest" \
             | grep "^apnic|CN|ipv4|" > cn_raw.txt
@@ -38,9 +37,8 @@ jobs:
           print(f"[*] CN CIDRs: {len(cidrs)}, total IPs: ~{total:,}")
           PY
 
-      - name: Scan SOCKS5 ports
+      - name: s2
         run: |
-          # Common SOCKS5 ports: 1080,1081,10808,7890,7891,8880,9050,9150,4145,43350
           PORTS="1080,1081,10808,7890,7891,8880,9050,4145,43350,10801,1089,20170,51837"
           RATE="${{ inputs.rate || '2000000' }}"
           echo "[*] Scanning SOCKS5 ports: $PORTS at ${RATE} pps"
@@ -53,7 +51,7 @@ jobs:
             -oJ masscan_socks5_raw.json
           echo "[*] Open ports: $(grep -c '"port"' masscan_socks5_raw.json 2>/dev/null || echo 0)"
 
-      - name: Parse to ip:port list
+      - name: s3
         run: |
           python3 - <<'PY'
           import json
@@ -84,10 +82,8 @@ jobs:
           print(f"[done] {len(lines)} SOCKS5 candidates")
           PY
 
-      - name: Validate SOCKS5 proxies
+      - name: s4
         run: |
-          # Phase 1: fast SOCKS5 handshake test
-          # Phase 2: real connectivity test via httpbin through proxy
           python3 - <<'PY'
           import socket, struct, concurrent.futures, time, sys, os
 
@@ -110,19 +106,16 @@ jobs:
               host, port = addr.rsplit(":", 1)
               try:
                   s = socket.create_connection((host, int(port)), timeout=timeout)
-                  # handshake
                   s.sendall(b"\x05\x01\x00")
                   resp = s.recv(2)
                   if len(resp) != 2 or resp[0] != 0x05 or resp[1] not in (0x00, 0x02):
                       s.close(); return None
-                  # CONNECT to httpbin.org:80 (domain type 0x03)
                   target = b"httpbin.org"
                   req = b"\x05\x01\x00\x03" + bytes([len(target)]) + target + struct.pack("!H", 80)
                   s.sendall(req)
                   cresp = s.recv(10)
                   if len(cresp) < 2 or cresp[1] != 0x00:
                       s.close(); return None
-                  # Send HTTP request
                   s.sendall(b"GET /ip HTTP/1.1\r\nHost: httpbin.org\r\nConnection: close\r\n\r\n")
                   data = b""
                   while True:
@@ -140,7 +133,6 @@ jobs:
           with open("socks5_candidates.txt") as f:
               candidates = [l.strip() for l in f if l.strip()]
 
-          # Phase 1: handshake
           print(f"[phase1] Testing {len(candidates)} candidates (handshake)...")
           handshake_ok = []
           with concurrent.futures.ThreadPoolExecutor(max_workers=500) as ex:
@@ -151,7 +143,6 @@ jobs:
                       handshake_ok.append(r)
           print(f"[phase1] {len(handshake_ok)} passed handshake")
 
-          # Phase 2: connectivity
           print(f"[phase2] Testing {len(handshake_ok)} proxies (real connectivity)...")
           alive = []
           with concurrent.futures.ThreadPoolExecutor(max_workers=200) as ex:
@@ -169,7 +160,7 @@ jobs:
           print(f"[done] {len(alive)} / {len(candidates)} fully verified SOCKS5 proxies")
           PY
 
-      - name: Upload artifacts
+      - name: s5
         if: always()
         uses: actions/upload-artifact@v4
         with:
